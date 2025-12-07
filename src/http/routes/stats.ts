@@ -7,7 +7,17 @@ const router = Router();
 // GET /api/stats?telegramUserId=123456789&days=7
 router.get('/n', async (req, res) => {
   try {
-    console.log("Processing req: ", req);
+    console.log("/api/stats/n hit", {
+      method: req.method,
+      path: req.path,
+      originalUrl: req.originalUrl,
+      query: req.query,
+      headers: {
+        host: req.headers.host,
+        origin: req.headers.origin,
+        referer: req.headers.referer,
+      },
+    });
     const telegramUserIdStr = req.query.telegramUserId as string | undefined;
     const daysStr = req.query.days as string | undefined;
 
