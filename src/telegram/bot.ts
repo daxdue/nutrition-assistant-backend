@@ -107,10 +107,11 @@ bot.start(async (ctx) => {
   await ctx.reply(
     '👋 Hi! I’m your training & nutrition assistant.\n' +
     //'Right now we are testing Garmin CIQ + meal photos.\n' +
-    'Send me a photo of what you eat and I’ll log it for later analysis.' +
+    'Send me a photo of what you eat and I’ll log it for later analysis.\n\n' +
     '⚠️ Disclaimer: This bot is not a medical service. \n\n' +
     'It provides approximate nutrition estimates and should not be used for medical, diagnostic, or dietary treatment purposes. \n\n' +
-    'By using this bot and sending photos, you agree to our Privacy Policy. Use /privacy command to view it anytime.',
+    'By using this bot and sending photos, you agree to our Privacy Policy. \n\n' +
+    'Use /privacy command to view it anytime.',
 
     /*{
       reply_markup: {
