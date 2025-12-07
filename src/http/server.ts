@@ -1,10 +1,20 @@
 // src/http/server.ts
 import express, { Application, Request, Response, NextFunction } from 'express';
+import cors from 'cors';
 import { garminRouter } from './routes/garmin';
 import router from './routes/stats';
 
 export function createServer(): Application {
   const app = express();
+
+  const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || '';
+
+  app.use(
+    cors({
+      origin: FRONTEND_ORIGIN,
+      credentials: false,
+    })
+  );
 
   // JSON body parsing
   app.use(express.json());
