@@ -1,0 +1,64 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id               String        @id @default(uuid())
+  telegramUserId   BigInt        @unique
+  telegramUsername String?
+  createdAt        DateTime      @default(now())
+
+  dailySummaries   DailySummary[]
+  garminDevices    GarminDevice[]
+  foodEntries      FoodEntry[]   // <--- add this line
+}
+
+model FoodEntry {
+  id             String   @id @default(uuid())
+  user           User     @relation(fields: [userId], references: [id])
+  userId         String
+
+  timestamp      DateTime
+  imagePathOrUrl String
+  captionText    String?
+  aiParsedJson   Json?
+
+  @@index([userId, timestamp])
+}
+
+model GarminDevice {
+  id        String   @id @default(uuid())
+  user      User     @relation(fields: [userId], references: [id])
+  userId    String
+  deviceId  String   @unique
+  model     String?
+  createdAt DateTime @default(now())
+}
+
+model DailySummary {
+  id                    String   @id @default(uuid())
+  user                  User     @relation(fields: [userId], references: [id])
+  userId                String
+  date                  DateTime
+  timezone              String?
+
+  // movement
+  steps                 Int?
+  activeCaloriesKcal    Int?
+  restingCaloriesKcal   Int?
+  totalCaloriesBurned   Int?
+
+  // heart / recovery
+  bodyBatteryEvening    Int?
+  stressAvg             Int?
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@unique([userId, date])
+}
