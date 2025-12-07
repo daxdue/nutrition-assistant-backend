@@ -12,7 +12,8 @@ if (!BOT_TOKEN) {
 
 export const bot = new Telegraf(BOT_TOKEN);
 
-const WEBAPP_URL = "https://18e9f13fcdac.ngrok-free.app";
+const ADMIN_TELEGRAM_ID = Number(process.env.ADMIN_TELEGRAM_ID);
+const PRIVACY_URL = "https://nutrition-miniapp-933t8h3ax-daxdues-projects.vercel.app/privacy.html";
 
 /**
  * Find or create a user record based on Telegram user id.
@@ -77,7 +78,10 @@ bot.start(async (ctx) => {
     return ctx.reply(
       '👋 Hi! This nutrition assistant is currently in private beta.\n\n' +
       'Only pre-approved testers can use it right now.\n\n' +
-      'If you’d like to join, tap the button below to submit an access request.',
+      'If you’d like to join, tap the button below to submit an access request.\n\n' +
+      '⚠️ Disclaimer: This bot is not a medical service. \n\n' +
+      'It provides approximate nutrition estimates and should not be used for medical, diagnostic, or dietary treatment purposes. \n\n' +
+      'By using this bot and sending photos, you agree to our Privacy Policy. Use /privacy command to view it anytime.',
       {
         reply_markup: {
           inline_keyboard: [
@@ -103,7 +107,11 @@ bot.start(async (ctx) => {
   await ctx.reply(
     '👋 Hi! I’m your training & nutrition assistant.\n' +
     //'Right now we are testing Garmin CIQ + meal photos.\n' +
-    'Send me a photo of what you eat and I’ll log it for later analysis.',
+    'Send me a photo of what you eat and I’ll log it for later analysis.' +
+    '⚠️ Disclaimer: This bot is not a medical service. \n\n' +
+    'It provides approximate nutrition estimates and should not be used for medical, diagnostic, or dietary treatment purposes. \n\n' +
+    'By using this bot and sending photos, you agree to our Privacy Policy. Use /privacy command to view it anytime.',
+
     /*{
       reply_markup: {
         keyboard: [
@@ -127,6 +135,20 @@ bot.start(async (ctx) => {
 // Later: create NutritionEntry rows, download image, send to OpenAI, etc.
 bot.on(message('photo'), async (ctx) => {
   const user = await getOrCreateUser(ctx);
+
+  if (!user) {
+    return ctx.reply(
+      "🚫 You are not authorized to use this bot.\n" +
+      "Use /start to submit an access request."
+    );
+  }
+
+  if (user.status !== "ACTIVE") {
+    return ctx.reply(
+      "⏳ Your access request is pending.\n" +
+      "You’ll be able to log meals once an admin approves it."
+    );
+  }
 
   const photos = ctx.message.photo; // <-- fully typed as PhotoSize[]
   const caption = ctx.message.caption || '';
@@ -199,6 +221,116 @@ bot.action('request_access', async (ctx) => {
   }
 });
 
+bot.command("privacy", async (ctx) => {
+  await ctx.reply(
+    `📄 *Privacy Policy*\n\n` +
+    `This bot analyzes meal photos using AI to estimate nutrition.\n` +
+    `It is intended for general informational purposes only.\n\n` +
+    `⚠️ *Disclaimer:* This bot is not a medical service and should not be used for medical or diagnostic purposes.\n\n` +
+    `Full Privacy Policy:\n${PRIVACY_URL}\n\n` +
+    `You can delete all stored data anytime using /delete.`,
+    { parse_mode: "Markdown" }
+  );
+});
+
+bot.command("pending_approval", async (ctx) => {
+  const fromId = ctx.from?.id;
+
+  if (fromId !== ADMIN_TELEGRAM_ID) {
+    return ctx.reply("⛔ You are not allowed to view pending approvals.");
+  }
+
+  const pendingUsers = await prisma.user.findMany({
+    where: { status: "INACTIVE" },
+    orderBy: { createdAt: "asc" },
+    take: 30, // basic safety limit
+  });
+
+  if (pendingUsers.length === 0) {
+    return ctx.reply("✅ No users are waiting for approval.");
+  }
+
+  const lines = pendingUsers.map((u, idx) => {
+    return `${idx + 1}. id=${u.telegramUserId.toString()} ` +
+      (u.telegramUsername ? `(@${u.telegramUsername})` : "");
+  });
+
+  // Build inline keyboard: one Approve button per user
+  const keyboard = pendingUsers.map((u) => [
+    {
+      text: `✅ Approve ${u.telegramUserId.toString()}`,
+      callback_data: `approve_user:${u.telegramUserId.toString()}`,
+    },
+  ]);
+
+  await ctx.reply(
+    "🕒 Pending approval users:\n\n" +
+    lines.join("\n") +
+    "\n\nTap a button below to approve:",
+    {
+      reply_markup: {
+        inline_keyboard: keyboard,
+      },
+    }
+  );
+});
+
+bot.action(/approve_user:(\d+)/, async (ctx) => {
+  const fromId = ctx.from?.id;
+
+  if (fromId !== ADMIN_TELEGRAM_ID) {
+    await ctx.answerCbQuery("⛔ You are not allowed to approve users.", {
+      show_alert: true,
+    });
+    return;
+  }
+
+  const match = ctx.match as RegExpMatchArray;
+  const telegramIdStr = match[1];
+  const telegramIdBigInt = BigInt(telegramIdStr);
+
+  const user = await prisma.user.findUnique({
+    where: { telegramUserId: telegramIdBigInt },
+  });
+
+  if (!user) {
+    await ctx.answerCbQuery("❌ User not found.", { show_alert: true });
+    return;
+  }
+
+  if (user.status === "ACTIVE") {
+    await ctx.answerCbQuery("ℹ️ User is already active.", {
+      show_alert: false,
+    });
+    return;
+  }
+
+  await prisma.user.update({
+    where: { telegramUserId: telegramIdBigInt },
+    data: { status: "ACTIVE" },
+  });
+
+  await ctx.answerCbQuery("✅ User approved!", { show_alert: false });
+
+  // Try to notify the user
+  try {
+    await ctx.telegram.sendMessage(
+      Number(telegramIdStr),
+      "🎉 Your access to the Nutrition Assistant has been *approved*!\n\n" +
+      "You can now send meal photos and view your nutrition stats."
+    );
+  } catch (err) {
+    console.error("Failed to notify approved user:", err);
+  }
+
+  // Optionally update the admin's message to show status
+  await ctx.answerCbQuery("✅ User approved!", { show_alert: false });
+
+  // notify admin
+  await ctx.reply(
+    `✅ Approved user ${telegramIdStr} at ${new Date().toLocaleString()}`
+  );
+});
 
 /*bot.command("stats", async (ctx) => {
   await ctx.reply("📊 Open your nutrition stats:", {
@@ -216,6 +348,13 @@ bot.action('request_access', async (ctx) => {
 });*/
 
 export async function launchBot() {
+  await bot.telegram.setMyCommands([
+    { command: 'start', description: 'Start the bot' },
+    { command: 'stats', description: 'Open nutrition stats' },
+    { command: 'privacy', description: 'View privacy policy' },
+    // later: { command: 'delete', description: 'Delete my data' },
+  ]);
+
   await bot.launch();
   console.log('Telegram bot started');
 
