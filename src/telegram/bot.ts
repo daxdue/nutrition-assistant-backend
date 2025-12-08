@@ -44,6 +44,9 @@ bot.use(async (ctx, next) => {
 
   if (text === '/start') {
     return next();
+
+  } else if (text === '/request_access') {
+    return next();
   }
 
   const telegramUserId = ctx.from?.id;
