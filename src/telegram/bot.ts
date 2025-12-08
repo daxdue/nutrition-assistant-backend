@@ -49,8 +49,13 @@ bot.use(async (ctx, next) => {
       : undefined;
 
   // callback data (for inline buttons)
-  const callbackData =
-    ctx.updateType === "callback_query" ? ctx.callbackQuery?.data : undefined;
+  let callbackData: string | undefined = undefined;
+
+  if (ctx.updateType === "callback_query" && ctx.callbackQuery) {
+    if ("data" in ctx.callbackQuery && typeof ctx.callbackQuery.data === "string") {
+      callbackData = ctx.callbackQuery.data;
+    }
+  }
 
   // 1) Always allow /start so users can see info / submit request
   if (text === "/start") {
