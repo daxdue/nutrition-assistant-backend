@@ -40,36 +40,56 @@ async function getOrCreateUser(ctx: Context) {
 }
 
 bot.use(async (ctx, next) => {
-  const text = 'text' in (ctx.message || {}) ? (ctx.message as any).text : '';
+  const fromId = ctx.from?.id;
 
-  if (text === '/start') {
-    return next();
+  // message text (for /start)
+  const text =
+    ctx.updateType === "message" && "text" in (ctx.message ?? {})
+      ? (ctx.message as any).text
+      : undefined;
 
-  } else if (text === '/request_access') {
+  // callback data (for inline buttons)
+  const callbackData =
+    ctx.updateType === "callback_query" ? ctx.callbackQuery?.data : undefined;
+
+  // 1) Always allow /start so users can see info / submit request
+  if (text === "/start") {
     return next();
   }
 
-  const telegramUserId = ctx.from?.id;
-  if (!telegramUserId) return;
+  // 2) Allow unauth users to hit the "request_access" button
+  if (callbackData === "request_access") {
+    return next();
+  }
+
+  // (optionally also allow admin-only callbacks like approve_user:...)
+  if (callbackData?.startsWith("approve_user:")) {
+    // you can still check admin inside the action handler
+    return next();
+  }
+
+  // From here on, require an existing ACTIVE user
+  if (!fromId) return;
 
   const user = await prisma.user.findUnique({
-    where: { telegramUserId: BigInt(telegramUserId) },
+    where: { telegramUserId: BigInt(fromId) },
   });
 
   if (!user) {
     return ctx.reply(
-      '🚫 You are not authorized to use this bot.\n' +
-      'Tap "Submit access request" via /start to ask for access.'
+      "🚫 You are not authorized to use this bot.\n" +
+      "Use /start to submit an access request."
     );
   }
 
-  if (user?.status !== 'ACTIVE') {
+  if (user.status !== "ACTIVE") {
     return ctx.reply(
-      '⏳ Your access request is pending review.\n' +
-      'You will be notified once you are approved.'
+      "⏳ Your access request is pending review.\n" +
+      "You’ll be notified once an admin approves it."
     );
   }
 
+  // Authorized and ACTIVE → pass through
   return next();
 });
 
