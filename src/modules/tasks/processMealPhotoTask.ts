@@ -3,10 +3,12 @@ import { analyzeNutritionFromImage } from "../ai/nutrition.analyzer.service";
 import { prisma } from "../../db/client";
 import { bot } from "../../telegram/bot";
 import { formatNutritionSummary } from "../../utils/formatNutrition";
+import { recordAbuseAndMaybeBan } from "../../services/abuse.service";
 
 interface ProcessMealPhotoArgs {
     imageUrl: string;
     userId: string;
+    telegramUserId: bigint;
     chatId: number;
     caption: string;
 };
@@ -14,6 +16,7 @@ interface ProcessMealPhotoArgs {
 export async function processMealPhotoTask({
     imageUrl,
     userId,
+    telegramUserId,
     chatId,
     caption,
 }: ProcessMealPhotoArgs) {
@@ -23,7 +26,36 @@ export async function processMealPhotoTask({
         const response = await axios.get(imageUrl, { responseType: 'arraybuffer' });
         const imageBuffer = Buffer.from(response.data);
 
-        const analysis = await analyzeNutritionFromImage(imageBuffer);
+        const analysis = await analyzeNutritionFromImage(imageBuffer, caption);
+
+        if (!analysis.allowed) {
+            // - log abuse / abuseEvent
+            // - auto-increment blockedImageCount / possibly ban
+            // - send appropriate message
+
+            await recordAbuseAndMaybeBan({
+                userId,
+                telegramUserId,
+                chatId,
+                analysis,
+            });
+
+            if (analysis.category === "NOT_MEAL") {
+                await bot.telegram.sendMessage(
+                    chatId,
+                    "🤔 I can’t see any meal here. This bot is only for photos of food or drinks."
+                );
+
+            } else {
+                await bot.telegram.sendMessage(
+                    chatId,
+                    "🚫 I can’t process this image. This bot only accepts normal meal photos and disallows sensitive or illegal content."
+                );
+            }
+
+            return;
+        }
+
         await prisma.foodEntry.create({
             data: {
                 userId,

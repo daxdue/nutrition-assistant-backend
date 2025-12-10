@@ -10,6 +10,19 @@ generator client {
 enum UserStatus {
   ACTIVE
   INACTIVE
+  BANNED
+}
+
+enum AbuseCategory {
+  NOT_MEAL
+  NUDITY
+  SEXUAL_CONTENT
+  VIOLENCE
+  SELF_HARM
+  HATE_SYMBOLS
+  DRUGS
+  WEAPON
+  OTHER
 }
 
 model User {
@@ -22,7 +35,8 @@ model User {
 
   dailySummaries   DailySummary[]
   garminDevices    GarminDevice[]
-  foodEntries      FoodEntry[]   // <--- add this line
+  foodEntries      FoodEntry[]
+  abuseEvents      AbuseEvent[]
 }
 
 model FoodEntry {
@@ -68,4 +82,14 @@ model DailySummary {
   updatedAt             DateTime @updatedAt
 
   @@unique([userId, date])
+}
+
+model AbuseEvent {
+  id                    String            @id @default(uuid())
+  user                  User?             @relation(fields: [userId], references: [id])
+  userId                String?
+  telegramUserId        BigInt
+  category              AbuseCategory
+  reason                String
+  createdAt             DateTime          @default(now())
 }

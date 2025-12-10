@@ -87,7 +87,12 @@ bot.use(async (ctx, next) => {
     );
   }
 
-  if (user.status !== "ACTIVE") {
+  if (user.status === "BANNED") {
+    return ctx.reply(
+      "🚫 Your access to this bot has been blocked due to repeated content policy violations."
+    );
+
+  } else if (user.status !== "ACTIVE") {
     return ctx.reply(
       "⏳ Your access request is pending review.\n" +
       "You’ll be notified once an admin approves it."
@@ -193,6 +198,7 @@ bot.on(message('photo'), async (ctx) => {
   void processMealPhotoTask({
     imageUrl: fileUrl.href,
     userId: user?.id || '',
+    telegramUserId: user?.telegramUserId,
     chatId: ctx.chat.id,
     caption,
   });
