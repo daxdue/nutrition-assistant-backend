@@ -3,6 +3,7 @@ import express, { Application, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { garminRouter } from './routes/garmin';
 import router from './routes/stats';
+import { subscriptionRouter } from './routes/subscriptions';
 
 export function createServer(): Application {
   const app = express();
@@ -25,6 +26,7 @@ export function createServer(): Application {
 
   app.use('/api/garmin', garminRouter);
   app.use('/api/stats', router);
+  app.use('/api/subscriptions', subscriptionRouter);
 
   // Basic error handler
   app.use(
