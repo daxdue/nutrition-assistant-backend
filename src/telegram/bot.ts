@@ -17,7 +17,7 @@ export const bot = new Telegraf(BOT_TOKEN);
 const ADMIN_TELEGRAM_ID = Number(process.env.ADMIN_TELEGRAM_ID);
 const PRIVACY_URL = "https://nutrition-miniapp-933t8h3ax-daxdues-projects.vercel.app/privacy.html";
 const BACKEND_URL = process.env.BACKEND_URL || process.env.PUBLIC_URL || 'http://localhost:3000';
-const MINIAPP_URL = process.env.MINIAPP_URL || "https://nutrition-miniapp-933t8h3ax-daxdues-projects.vercel.app";
+const MINIAPP_URL = process.env.FRONTEND_ORIGIN || "https://nutrition-miniapp-933t8h3ax-daxdues-projects.vercel.app";
 
 /**
  * Find or create a user record based on Telegram user id.
