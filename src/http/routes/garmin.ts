@@ -1,6 +1,8 @@
 // src/http/routes/garmin.ts
-import { Router, Request, Response, NextFunction } from 'express';
+import { Router, Response, NextFunction } from 'express';
 import { prisma } from '../../db/client';
+import { apiKeyAuth, verifyDeviceId, AuthenticatedRequest } from '../middleware/apiKeyAuth';
+import { garminDeviceRateLimit } from '../middleware/rateLimit';
 
 export const garminRouter = Router();
 
@@ -17,26 +19,24 @@ export interface GarminDailyPayload {
   stressAvg?: number | null;
 }
 
+// Apply rate limiting and API key authentication middleware to all routes
+garminRouter.use(garminDeviceRateLimit());
+garminRouter.use(apiKeyAuth);
+
 garminRouter.post(
   '/daily',
-  async (req: Request<unknown, unknown, GarminDailyPayload>, res: Response, next: NextFunction) => {
+  verifyDeviceId, // Verify deviceId matches authenticated device
+  async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
-      const { deviceId, timestamp, steps, activeCalories, bodyBattery, stressAvg } = req.body;
+      const { timestamp, steps, activeCalories, bodyBattery, stressAvg } = req.body;
 
-      if (!deviceId || typeof timestamp !== 'number') {
-        return res.status(400).json({ error: 'Missing or invalid deviceId/timestamp' });
+      if (typeof timestamp !== 'number') {
+        return res.status(400).json({ error: 'Missing or invalid timestamp' });
       }
 
-      const device = await prisma.garminDevice.findUnique({
-        where: { deviceId },
-      });
-
-      if (!device) {
-        console.warn('Unknown deviceId', deviceId);
-        return res.status(404).json({ error: 'Unknown device' });
-      }
-
-      const userId = device.userId;
+      // Device is already authenticated and verified via middleware
+      // req.device is guaranteed to exist at this point
+      const userId = req.device!.userId;
 
       // Convert epoch seconds → Date and normalize to midnight UTC for "day"
       const dateTime = new Date(timestamp * 1000);

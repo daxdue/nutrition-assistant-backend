@@ -1,9 +1,11 @@
 // src/telegram/bot.ts
 import { Telegraf, Context } from 'telegraf';
 import { message } from 'telegraf/filters';
+import axios from 'axios';
 
 import { prisma } from '../db/client';
 import { processMealPhotoTask } from '../modules/tasks/processMealPhotoTask';
+import { generatePairingToken } from '../services/garmin.service';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -14,6 +16,8 @@ export const bot = new Telegraf(BOT_TOKEN);
 
 const ADMIN_TELEGRAM_ID = Number(process.env.ADMIN_TELEGRAM_ID);
 const PRIVACY_URL = "https://nutrition-miniapp-933t8h3ax-daxdues-projects.vercel.app/privacy.html";
+const BACKEND_URL = process.env.BACKEND_URL || process.env.PUBLIC_URL || 'http://localhost:3000';
+const MINIAPP_URL = process.env.MINIAPP_URL || "https://nutrition-miniapp-933t8h3ax-daxdues-projects.vercel.app";
 
 /**
  * Find or create a user record based on Telegram user id.
@@ -268,6 +272,57 @@ bot.command("privacy", async (ctx) => {
   );
 });
 
+bot.command("pairGarminWatch", async (ctx) => {
+  const user = await getOrCreateUser(ctx);
+
+  if (!user) {
+    return ctx.reply(
+      "🚫 You are not authorized to use this bot.\n" +
+      "Use /start to submit an access request."
+    );
+  }
+
+  if (user.status !== "ACTIVE") {
+    return ctx.reply(
+      "⏳ Your access request is pending.\n" +
+      "You'll be able to pair devices once an admin approves it."
+    );
+  }
+
+  try {
+    // Generate pairing token via API
+    const token = await generatePairingToken(user.id);
+    const pairingUrl = `${MINIAPP_URL}?token=${token}&page=pairing`;
+
+    await ctx.reply(
+      `⌚ *Pair Garmin Watch*\n\n` +
+      `1. Open the Nutrition Assistant app on your Garmin watch\n` +
+      `2. The watch will display a Device ID or QR code\n` +
+      `3. Tap the button below to open the pairing page\n` +
+      `4. Scan the QR code or enter the Device ID manually\n\n` +
+      `⚠️ This pairing link expires in 10 minutes.`,
+      {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: "⌚ Open Pairing Page",
+                web_app: { url: pairingUrl },
+              },
+            ],
+          ],
+        },
+      }
+    );
+  } catch (error: any) {
+    console.error("Error generating pairing token:", error);
+    await ctx.reply(
+      "❌ Failed to generate pairing token. Please try again later."
+    );
+  }
+});
+
 bot.command("pending_approval", async (ctx) => {
   const fromId = ctx.from?.id;
 
@@ -385,6 +440,7 @@ bot.action(/approve_user:(\d+)/, async (ctx) => {
 export async function launchBot() {
   await bot.telegram.setMyCommands([
     { command: 'start', description: 'Start the bot' },
+    { command: 'pair', description: 'Pair Garmin watch' },
     { command: 'stats', description: 'Open nutrition stats' },
     { command: 'privacy', description: 'View privacy policy' },
     // later: { command: 'delete', description: 'Delete my data' },
