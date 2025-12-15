@@ -25,6 +25,18 @@ enum AbuseCategory {
   OTHER
 }
 
+enum SubscriptionInterval {
+  MONTHLY
+  ANNUAL
+}
+
+enum SubscriptionStatus {
+  IN_TRIAL
+  ACTIVE
+  CANCELED
+  EXPIRED
+}
+
 model User {
   id               String        @id @default(uuid())
   telegramUserId   BigInt        @unique
@@ -37,6 +49,7 @@ model User {
   garminDevices    GarminDevice[]
   foodEntries      FoodEntry[]
   abuseEvents      AbuseEvent[]
+  subscriptions    UserSubscription[]
 }
 
 model FoodEntry {
@@ -92,4 +105,60 @@ model AbuseEvent {
   category              AbuseCategory
   reason                String
   createdAt             DateTime          @default(now())
+}
+
+model SubscriptionPlan {
+  id          String                @id @default(uuid())
+  name        String
+  description String?
+  interval    SubscriptionInterval
+  priceCents  Int
+  trialDays   Int                   @default(0)
+  active      Boolean               @default(true)
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+
+  subscriptions UserSubscription[]
+  promoCodes    PromoCode[]
+}
+
+model PromoCode {
+  id              String               @id @default(uuid())
+  code            String               @unique
+  description     String?
+  discountPercent Int                  @default(0)
+  maxRedemptions  Int?
+  redeemedCount   Int                  @default(0)
+  expiresAt       DateTime?
+  active          Boolean              @default(true)
+  planId          String?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  plan            SubscriptionPlan?    @relation(fields: [planId], references: [id])
+  subscriptions   UserSubscription[]
+}
+
+model UserSubscription {
+  id               String              @id @default(uuid())
+  userId           String
+  planId           String
+  status           SubscriptionStatus  @default(IN_TRIAL)
+  startedAt        DateTime            @default(now())
+  trialEndsAt      DateTime?
+  currentPeriodEnd DateTime
+  autoRenew        Boolean             @default(true)
+  promoCodeId      String?
+  priceCents       Int
+  discountPercent  Int                 @default(0)
+  finalPriceCents  Int
+  canceledAt       DateTime?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  user             User                @relation(fields: [userId], references: [id])
+  plan             SubscriptionPlan    @relation(fields: [planId], references: [id])
+  promoCode        PromoCode?          @relation(fields: [promoCodeId], references: [id])
+
+  @@index([userId, status])
 }

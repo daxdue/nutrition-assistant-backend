@@ -2,8 +2,16 @@
 import { Telegraf, Context } from 'telegraf';
 import { message } from 'telegraf/filters';
 
+import { SubscriptionInterval, SubscriptionStatus } from '@prisma/client';
 import { prisma } from '../db/client';
 import { processMealPhotoTask } from '../modules/tasks/processMealPhotoTask';
+import {
+  getActivePlans,
+  getLatestSubscriptionForTelegram,
+  startSubscriptionForTelegram,
+  subscriptionToResponse,
+  SubscriptionError,
+} from '../services/subscription.service';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -14,6 +22,74 @@ export const bot = new Telegraf(BOT_TOKEN);
 
 const ADMIN_TELEGRAM_ID = Number(process.env.ADMIN_TELEGRAM_ID);
 const PRIVACY_URL = "https://nutrition-miniapp-933t8h3ax-daxdues-projects.vercel.app/privacy.html";
+
+function formatPrice(priceCents: number) {
+  return `$${(priceCents / 100).toFixed(2)}`;
+}
+
+function formatPlanLine(plan: {
+  id: string;
+  name: string;
+  interval: SubscriptionInterval;
+  priceCents: number;
+  trialDays: number;
+  description: string | null;
+}) {
+  const trialText = plan.trialDays > 0 ? ` | ${plan.trialDays}-day trial` : '';
+  return `• ${plan.name} (${plan.interval.toLowerCase()}): ${formatPrice(plan.priceCents)}${trialText}\n` +
+    (plan.description ? `  ${plan.description}\n` : '') +
+    `  Plan ID: ${plan.id}`;
+}
+
+function formatSubscriptionStatus(sub: ReturnType<typeof subscriptionToResponse>) {
+  if (!sub) {
+    return 'You do not have an active subscription yet. Use /subscribe to pick a plan.';
+  }
+
+  const planLine = `${sub.plan.name} (${sub.plan.interval.toLowerCase()})`;
+  const statusText =
+    sub.status === SubscriptionStatus.IN_TRIAL
+      ? `In trial until ${sub.trialEndsAt ? new Date(sub.trialEndsAt).toLocaleDateString() : 'n/a'}`
+      : sub.status === SubscriptionStatus.ACTIVE
+      ? `Active. Next renewal on ${new Date(sub.currentPeriodEnd).toLocaleDateString()}`
+      : sub.status;
+  const priceLine = `Price: ${formatPrice(sub.finalPriceCents)}${
+    sub.discountPercent ? ` (after ${sub.discountPercent}% discount)` : ''
+  }`;
+  const promoLine = sub.promoCode ? `Promo code: ${sub.promoCode.code}` : null;
+
+  return [
+    `Plan: ${planLine}`,
+    `Status: ${statusText}`,
+    priceLine,
+    promoLine,
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+async function ensureActiveSubscription(ctx: Context) {
+  const telegramUserId = ctx.from?.id;
+
+  if (!telegramUserId) {
+    return null;
+  }
+
+  const subscription = await getLatestSubscriptionForTelegram(BigInt(telegramUserId));
+  const effective = subscriptionToResponse(subscription);
+
+  if (!effective ||
+    (effective.status !== SubscriptionStatus.ACTIVE && effective.status !== SubscriptionStatus.IN_TRIAL)
+  ) {
+    await ctx.reply(
+      '🔒 You need an active subscription to use this feature.\n' +
+      'Use /subscribe to pick a plan and start your trial.',
+    );
+    return null;
+  }
+
+  return effective;
+}
 
 /**
  * Find or create a user record based on Telegram user id.
@@ -184,6 +260,12 @@ bot.on(message('photo'), async (ctx) => {
     );
   }
 
+  const subscription = await ensureActiveSubscription(ctx);
+
+  if (!subscription) {
+    return;
+  }
+
   const photos = ctx.message.photo; // <-- fully typed as PhotoSize[]
   const caption = ctx.message.caption || '';
   const best = photos[photos.length - 1];
@@ -202,6 +284,81 @@ bot.on(message('photo'), async (ctx) => {
     chatId: ctx.chat.id,
     caption,
   });
+});
+
+bot.command('subscribe', async (ctx) => {
+  const user = await getOrCreateUser(ctx);
+
+  if (!user) {
+    return ctx.reply('🚫 You are not authorized to use this bot. Use /start first.');
+  }
+
+  if (user.status !== 'ACTIVE') {
+    return ctx.reply('⏳ Your access request is pending review. Please wait for approval.');
+  }
+
+  const text = (ctx.message as any)?.text || '';
+  const parts = text.split(' ').filter(Boolean);
+
+  if (parts.length >= 2) {
+    const planId = parts[1];
+    const promoCode = parts[2];
+
+    try {
+      const subscription = await startSubscriptionForTelegram({
+        telegramUserId: BigInt(ctx.from!.id),
+        planId,
+        promoCode,
+      });
+
+      const formatted = formatSubscriptionStatus(subscriptionToResponse(subscription));
+
+      await ctx.reply(`✅ Subscription started!\n\n${formatted}`);
+    } catch (err: any) {
+      if (err instanceof SubscriptionError) {
+        return ctx.reply(`❌ ${err.message}`);
+      }
+
+      console.error('Failed to start subscription', err);
+      return ctx.reply('❌ Failed to start subscription. Please try again later.');
+    }
+
+    return;
+  }
+
+  const plans = await getActivePlans();
+
+  if (!plans.length) {
+    return ctx.reply('No subscription plans are currently available. Please try again later.');
+  }
+
+  const lines = plans.map(formatPlanLine).join('\n\n');
+
+  await ctx.reply(
+    '📅 Subscription plans:\n\n' +
+      lines +
+      '\n\nTo subscribe, send:\n' +
+      '`/subscribe <PLAN_ID> [PROMO_CODE]`\n' +
+      'Example: `/subscribe basic-monthly WELCOME10`',
+    { parse_mode: 'Markdown' },
+  );
+});
+
+bot.command('subscription', async (ctx) => {
+  const user = await getOrCreateUser(ctx);
+
+  if (!user) {
+    return ctx.reply('🚫 You are not authorized to use this bot. Use /start first.');
+  }
+
+  if (user.status !== 'ACTIVE') {
+    return ctx.reply('⏳ Your access request is pending review. Please wait for approval.');
+  }
+
+  const subscription = await getLatestSubscriptionForTelegram(BigInt(ctx.from!.id));
+  const response = formatSubscriptionStatus(subscriptionToResponse(subscription));
+
+  await ctx.reply(response);
 });
 
 bot.action('request_access', async (ctx) => {
@@ -386,6 +543,8 @@ export async function launchBot() {
   await bot.telegram.setMyCommands([
     { command: 'start', description: 'Start the bot' },
     { command: 'stats', description: 'Open nutrition stats' },
+    { command: 'subscribe', description: 'View plans and start a subscription' },
+    { command: 'subscription', description: 'Check your subscription status' },
     { command: 'privacy', description: 'View privacy policy' },
     // later: { command: 'delete', description: 'Delete my data' },
   ]);
