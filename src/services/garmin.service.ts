@@ -56,39 +56,30 @@ export const isPairingTokenValid = async (token: string) => {
     const pairingToken = await prisma.pairingToken.findUnique({
         where: { token },
         include: { user: true },
-      });
+    });
 
-      if (!pairingToken) {
+    if (!pairingToken) {
         return false;
-      }
+    }
 
-      if (pairingToken.used) {
+    if (pairingToken.used) {
         return false;
-      }
+    }
 
-      if (new Date() > pairingToken.expiresAt) {
+    if (new Date() > pairingToken.expiresAt) {
         return false;
-      }
+    }
 
-      return true;
+    return true;
 };
 
-export const generatePairingQRCode = async (deviceId: string) => {
-    if (!deviceId) {
-        return null;
-      }
+export const generatePairingQRCode = async (deviceId: string): Promise<Buffer | null> => {
+    if (!deviceId) return null;
 
-      // Generate QR code as PNG buffer
-      const qrCodeDataUrl = await QRCode.toDataURL(deviceId, {
+    return QRCode.toBuffer(deviceId, {
         errorCorrectionLevel: 'M',
-        type: 'image/png',
+        type: 'png',
         width: 300,
         margin: 1,
-      });
-
-      // Convert data URL to buffer
-      const base64Data = qrCodeDataUrl.replace(/^data:image\/png;base64,/, '');
-      const imageBuffer = Buffer.from(base64Data, 'base64');
-
-      return imageBuffer;
+    });
 };

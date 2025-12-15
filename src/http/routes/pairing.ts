@@ -59,13 +59,15 @@ pairingRouter.get(
         return res.status(400).json({ error: 'Missing deviceId' });
       }
 
-      // Generate QR code as PNG buffer
-      
-      const imageBuffer = generatePairingQRCode(deviceId);
+      const imageBuffer = await generatePairingQRCode(deviceId);
 
-      // Set headers for image response
+      if (!imageBuffer) {
+        return res.status(400).json({ error: 'Failed to generate QR code' });
+      }
+
       res.setHeader('Content-Type', 'image/png');
-      res.setHeader('Cache-Control', 'public, max-age=3600'); // Cache for 1 hour
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+
       res.send(imageBuffer);
     } catch (err) {
       next(err);
@@ -123,8 +125,8 @@ pairingRouter.post(
             where: { id: pairingToken.id },
             data: { used: true },
           });
-          return res.status(200).json({ 
-            ok: true, 
+          return res.status(200).json({
+            ok: true,
             message: 'Device already paired to this account',
             deviceId: existingDevice.id,
             apiKey: existingDevice.apiKey, // Return existing API key
