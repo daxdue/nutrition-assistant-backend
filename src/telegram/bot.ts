@@ -292,7 +292,7 @@ bot.command("pairGarminWatch", async (ctx) => {
   try {
     // Generate pairing token via API
     const token = await generatePairingToken(user.id);
-    const pairingUrl = `${MINIAPP_URL}?token=${token}&page=pairing`;
+    const pairingUrl = `${MINIAPP_URL}?token=${token?.token}&page=pairing`;
 
     await ctx.reply(
       `⌚ *Pair Garmin Watch*\n\n` +
