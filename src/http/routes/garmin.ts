@@ -149,6 +149,7 @@ garminRouter.post(
 
       const deviceExternalId = deviceInfo?.deviceId ?? req.device?.deviceId ?? null;
       if (deviceExternalId) {
+        const deviceApiKey = req.device?.apiKey ?? undefined;
         await prisma.providerDevice.upsert({
           where: {
             providerAccountId_externalDeviceId: {
@@ -157,6 +158,7 @@ garminRouter.post(
             },
           },
           update: {
+            deviceApiKey,
             model: deviceInfo?.model ?? undefined,
             firmwareVersion: deviceInfo?.firmwareVersion ?? undefined,
             deviceName: deviceInfo?.deviceName ?? undefined,
@@ -164,6 +166,7 @@ garminRouter.post(
           create: {
             providerAccountId: providerAccount.id,
             externalDeviceId: deviceExternalId,
+            deviceApiKey,
             model: deviceInfo?.model ?? undefined,
             firmwareVersion: deviceInfo?.firmwareVersion ?? undefined,
             deviceName: deviceInfo?.deviceName ?? undefined,
@@ -182,8 +185,8 @@ garminRouter.post(
         deviceUpdateData.deviceName = deviceInfo.deviceName;
       }
       if (Object.keys(deviceUpdateData).length > 0) {
-        await prisma.garminDevice.update({
-          where: { id: req.device!.id },
+        await prisma.garminDevice.updateMany({
+          where: { deviceId: req.device!.deviceId },
           data: deviceUpdateData,
         });
       }

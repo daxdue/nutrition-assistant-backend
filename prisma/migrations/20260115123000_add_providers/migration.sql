@@ -1,6 +1,9 @@
 -- CreateEnum
 CREATE TYPE "ActivityProvider" AS ENUM ('GARMIN', 'STRAVA', 'APPLE_HEALTH', 'OTHER');
 
+-- CreateEnum
+CREATE TYPE "ProviderAccountStatus" AS ENUM ('ACTIVE', 'REVOKED', 'EXPIRED', 'ERROR');
+
 -- AlterTable
 ALTER TABLE "DailySummary"
 ADD COLUMN     "providersPresent" JSONB,
@@ -17,8 +20,8 @@ CREATE TABLE "ProviderAccount" (
     "accessToken" TEXT,
     "refreshToken" TEXT,
     "tokenExpiresAt" TIMESTAMP(3),
-    "scopes" TEXT,
-    "status" TEXT,
+    "scopes" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+    "status" "ProviderAccountStatus" NOT NULL DEFAULT 'ACTIVE',
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 

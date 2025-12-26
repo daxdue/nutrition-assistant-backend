@@ -32,6 +32,13 @@ enum ActivityProvider {
   OTHER
 }
 
+enum ProviderAccountStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+  ERROR
+}
+
 model User {
   id               String        @id @default(uuid())
   telegramUserId   BigInt        @unique
@@ -179,8 +186,8 @@ model ProviderAccount {
   accessToken    String?
   refreshToken   String?
   tokenExpiresAt DateTime?
-  scopes         String?
-  status         String?
+  scopes         String[]
+  status         ProviderAccountStatus @default(ACTIVE)
   createdAt      DateTime         @default(now())
   updatedAt      DateTime         @updatedAt
 
@@ -196,6 +203,7 @@ model ProviderDevice {
   providerAccount   ProviderAccount @relation(fields: [providerAccountId], references: [id], onDelete: Cascade)
   providerAccountId String
   externalDeviceId  String?
+  deviceApiKey      String?         @unique
   model             String?
   firmwareVersion   String?
   deviceName        String?

@@ -11,10 +11,15 @@ async function backfillProviders() {
   for (const device of devices) {
     const account = await prisma.providerAccount.upsert({
       where: { userId_provider: { userId: device.userId, provider: "GARMIN" } },
-      update: {},
+      update: {
+        status: "ACTIVE",
+        scopes: ["write"],
+      },
       create: {
         userId: device.userId,
         provider: "GARMIN",
+        scopes: ["write"],
+        status: "ACTIVE",
       },
     });
 
@@ -28,6 +33,7 @@ async function backfillProviders() {
         },
       },
       update: {
+        deviceApiKey: device.apiKey,
         model: device.model ?? undefined,
         firmwareVersion: device.firmwareVersion ?? undefined,
         deviceName: device.deviceName ?? undefined,
@@ -35,6 +41,7 @@ async function backfillProviders() {
       create: {
         providerAccountId: account.id,
         externalDeviceId: device.deviceId,
+        deviceApiKey: device.apiKey,
         model: device.model ?? undefined,
         firmwareVersion: device.firmwareVersion ?? undefined,
         deviceName: device.deviceName ?? undefined,
