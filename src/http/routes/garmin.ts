@@ -1,5 +1,6 @@
 // src/http/routes/garmin.ts
 import { Router, Response, NextFunction } from 'express';
+import crypto from "crypto";
 import { prisma } from '../../db/client';
 import { DateTime } from "luxon";
 import { DEFAULT_TIMEZONE, getStartOfDayUtcFromEpochSeconds } from "../../utils/timezone";
@@ -137,6 +138,39 @@ garminRouter.post(
         ? DateTime.fromSeconds(dayStartTimestamp, { zone: "utc" }).toJSDate()
         : undefined;
 
+      const providerAccount = await prisma.providerAccount.upsert({
+        where: { userId_provider: { userId, provider: "GARMIN" } },
+        update: {},
+        create: {
+          userId,
+          provider: "GARMIN",
+        },
+      });
+
+      const deviceExternalId = deviceInfo?.deviceId ?? req.device?.deviceId ?? null;
+      if (deviceExternalId) {
+        await prisma.providerDevice.upsert({
+          where: {
+            providerAccountId_externalDeviceId: {
+              providerAccountId: providerAccount.id,
+              externalDeviceId: deviceExternalId,
+            },
+          },
+          update: {
+            model: deviceInfo?.model ?? undefined,
+            firmwareVersion: deviceInfo?.firmwareVersion ?? undefined,
+            deviceName: deviceInfo?.deviceName ?? undefined,
+          },
+          create: {
+            providerAccountId: providerAccount.id,
+            externalDeviceId: deviceExternalId,
+            model: deviceInfo?.model ?? undefined,
+            firmwareVersion: deviceInfo?.firmwareVersion ?? undefined,
+            deviceName: deviceInfo?.deviceName ?? undefined,
+          },
+        });
+      }
+
       const deviceUpdateData: { model?: string; firmwareVersion?: string; deviceName?: string } = {};
       if (deviceInfo?.model) {
         deviceUpdateData.model = deviceInfo.model;
@@ -158,6 +192,41 @@ garminRouter.post(
         where: { userId_date: { userId, date: dayStartUtc } },
         update: {
           timezone: userTimezone,
+          providersPresent: ["GARMIN"],
+          providerPrimary: "GARMIN",
+          metricSources: {
+            steps: "GARMIN",
+            activeCaloriesKcal: "GARMIN",
+            totalCaloriesKcal: "GARMIN",
+            distanceCm: "GARMIN",
+            floorsDescended: "GARMIN",
+            floorsClimbed: "GARMIN",
+            deviceBatteryPercent: "GARMIN",
+            deviceMemoryFreeBytes: "GARMIN",
+            activeMinutesTotal: "GARMIN",
+            activeMinutesVigorous: "GARMIN",
+            activeMinutesModerate: "GARMIN",
+            bodyBatteryDailyStart: "GARMIN",
+            bodyBatteryDailyEnd: "GARMIN",
+            bodyBatteryDailyMin: "GARMIN",
+            bodyBatteryDailyMax: "GARMIN",
+            bodyBatteryDailyCharged: "GARMIN",
+            bodyBatteryDailyDrained: "GARMIN",
+            bodyBatteryDailyNetChange: "GARMIN",
+            bodyBatteryDailySampleCount: "GARMIN",
+            stressAvg: "GARMIN",
+            stressMin: "GARMIN",
+            stressMax: "GARMIN",
+            stressSampleCount: "GARMIN",
+            heartRateAvgBpm: "GARMIN",
+            heartRateMinBpm: "GARMIN",
+            heartRateMaxBpm: "GARMIN",
+            heartRateSampleCount: "GARMIN",
+            spo2AvgPercent: "GARMIN",
+            spo2MinPercent: "GARMIN",
+            spo2MaxPercent: "GARMIN",
+            spo2SampleCount: "GARMIN",
+          },
           steps,
           activeCaloriesKcal,
           totalCaloriesKcal: metricsV2.totalCaloriesKcal ?? undefined,
@@ -197,6 +266,41 @@ garminRouter.post(
           userId,
           date: dayStartUtc,
           timezone: userTimezone,
+          providersPresent: ["GARMIN"],
+          providerPrimary: "GARMIN",
+          metricSources: {
+            steps: "GARMIN",
+            activeCaloriesKcal: "GARMIN",
+            totalCaloriesKcal: "GARMIN",
+            distanceCm: "GARMIN",
+            floorsDescended: "GARMIN",
+            floorsClimbed: "GARMIN",
+            deviceBatteryPercent: "GARMIN",
+            deviceMemoryFreeBytes: "GARMIN",
+            activeMinutesTotal: "GARMIN",
+            activeMinutesVigorous: "GARMIN",
+            activeMinutesModerate: "GARMIN",
+            bodyBatteryDailyStart: "GARMIN",
+            bodyBatteryDailyEnd: "GARMIN",
+            bodyBatteryDailyMin: "GARMIN",
+            bodyBatteryDailyMax: "GARMIN",
+            bodyBatteryDailyCharged: "GARMIN",
+            bodyBatteryDailyDrained: "GARMIN",
+            bodyBatteryDailyNetChange: "GARMIN",
+            bodyBatteryDailySampleCount: "GARMIN",
+            stressAvg: "GARMIN",
+            stressMin: "GARMIN",
+            stressMax: "GARMIN",
+            stressSampleCount: "GARMIN",
+            heartRateAvgBpm: "GARMIN",
+            heartRateMinBpm: "GARMIN",
+            heartRateMaxBpm: "GARMIN",
+            heartRateSampleCount: "GARMIN",
+            spo2AvgPercent: "GARMIN",
+            spo2MinPercent: "GARMIN",
+            spo2MaxPercent: "GARMIN",
+            spo2SampleCount: "GARMIN",
+          },
           steps,
           activeCaloriesKcal,
           totalCaloriesKcal: metricsV2.totalCaloriesKcal ?? undefined,
@@ -233,6 +337,44 @@ garminRouter.post(
           spo2SampleCount: metricsV2.spo2?.sampleCount ?? undefined,
         },
       });
+
+      const payloadHash = crypto
+        .createHash("sha256")
+        .update(JSON.stringify(body))
+        .digest("hex");
+
+      try {
+        await prisma.providerIngestion.create({
+          data: {
+            provider: "GARMIN",
+            userId,
+            providerAccountId: providerAccount.id,
+            payloadHash,
+            payloadJson: body as object,
+            sourceTimestamp: new Date(timestamp * 1000),
+            dayStartUtc,
+            schemaVersion: (body as GarminDailyPayloadV2).schemaVersion ?? undefined,
+            status: "OK",
+          },
+        });
+      } catch (error: any) {
+        if (error?.code !== "P2002") {
+          await prisma.providerIngestion.create({
+            data: {
+              provider: "GARMIN",
+              userId,
+              providerAccountId: providerAccount.id,
+              payloadHash,
+              payloadJson: body as object,
+              sourceTimestamp: new Date(timestamp * 1000),
+              dayStartUtc,
+              schemaVersion: (body as GarminDailyPayloadV2).schemaVersion ?? undefined,
+              status: "FAILED",
+              errorMessage: error?.message ?? "unknown_error",
+            },
+          });
+        }
+      }
 
       return res.status(200).json({ ok: true });
     } catch (err) {

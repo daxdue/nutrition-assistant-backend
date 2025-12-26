@@ -20,3 +20,7 @@
 - `MISSING_MEALS`: no food entries for the day.
 - `MISSING_MACROS`: at least one meal with missing macro totals.
 - Other flags are computed for low activity, high stress, low protein, and late eating.
+
+## Provider ingestion
+- Each provider payload is logged in `ProviderIngestion` with a hash for idempotency.
+- `DailySummary.providersPresent` and `metricSources` capture which provider supplied each metric.
