@@ -34,6 +34,7 @@ garminRouter.post(
         return res.status(400).json({ error: 'Missing or invalid timestamp' });
       }
 
+      console.log("Received Garmin daily data:", req.body);
       // Device is already authenticated and verified via middleware
       // req.device is guaranteed to exist at this point
       const userId = req.device!.userId;
