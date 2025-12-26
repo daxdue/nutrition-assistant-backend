@@ -60,6 +60,8 @@ model GarminDevice {
   deviceId  String   @unique
   apiKey    String   @unique
   model     String?
+  firmwareVersion String?
+  deviceName String?
   createdAt DateTime @default(now())
   
   @@index([apiKey])
@@ -71,16 +73,47 @@ model DailySummary {
   userId                String
   date                  DateTime
   timezone              String?
+  schemaVersion         String?
+  dayStartTimestamp     DateTime?
 
   // movement
   steps                 Int?
   activeCaloriesKcal    Int?
   restingCaloriesKcal   Int?
   totalCaloriesBurned   Int?
+  totalCaloriesKcal     Int?
+  distanceCm            Int?
+  floorsDescended       Int?
+  floorsClimbed         Int?
+  deviceBatteryPercent  Int?
+  deviceMemoryFreeBytes Int?
+  activeMinutesTotal    Int?
+  activeMinutesVigorous Int?
+  activeMinutesModerate Int?
 
   // heart / recovery
   bodyBatteryEvening    Int?
-  stressAvg             Int?
+  bodyBatteryDailyStart Int?
+  bodyBatteryDailyEnd   Int?
+  bodyBatteryDailyMin   Int?
+  bodyBatteryDailyMax   Int?
+  bodyBatteryDailyCharged Int?
+  bodyBatteryDailyDrained Int?
+  bodyBatteryDailyNetChange Int?
+  bodyBatteryDailySampleCount Int?
+
+  stressAvg             Float?
+  stressMin             Int?
+  stressMax             Int?
+  stressSampleCount     Int?
+  heartRateAvgBpm       Int?
+  heartRateMinBpm       Int?
+  heartRateMaxBpm       Int?
+  heartRateSampleCount  Int?
+  spo2AvgPercent        Float?
+  spo2MinPercent        Float?
+  spo2MaxPercent        Float?
+  spo2SampleCount       Int?
 
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt

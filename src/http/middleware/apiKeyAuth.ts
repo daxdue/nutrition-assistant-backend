@@ -85,7 +85,8 @@ export function verifyDeviceId(
     return;
   }
 
-  const bodyDeviceId = (req.body as { deviceId?: string })?.deviceId;
+  const body = req.body as { deviceId?: string; device?: { deviceId?: string } };
+  const bodyDeviceId = body?.device?.deviceId ?? body?.deviceId;
 
   if (!bodyDeviceId) {
     res.status(400).json({ error: 'Missing deviceId in request body' });
