@@ -1,6 +1,8 @@
 // src/http/routes/garmin.ts
-import { Router, Request, Response, NextFunction } from 'express';
+import { Router, Response, NextFunction } from 'express';
 import { prisma } from '../../db/client';
+import { apiKeyAuth, verifyDeviceId, AuthenticatedRequest } from '../middleware/apiKeyAuth';
+import { garminDeviceRateLimit } from '../middleware/rateLimit';
 
 export const garminRouter = Router();
 
@@ -8,57 +10,220 @@ export const garminRouter = Router();
  * Payload expected from your Connect IQ app.
  * NOTE: here timestamp is epoch seconds. If you send ms from CIQ, adjust the multiplier.
  */
-export interface GarminDailyPayload {
+export interface GarminDailyPayloadV1 {
   deviceId: string;
   timestamp: number;        // epoch seconds (e.g. System.getClockTime() or similar normalized)
-  steps: number;
-  activeCalories: number;
+  steps?: number;
+  activeCalories?: number;
   bodyBattery?: number | null;
   stressAvg?: number | null;
 }
 
+export interface GarminDailyPayloadV2 {
+  timestamp: number;        // epoch seconds
+  schemaVersion?: string;
+  device: {
+    deviceId: string;
+    model?: string;
+    firmwareVersion?: string;
+    deviceName?: string;
+  };
+  metrics: {
+    activeMinutes?: {
+      total?: number;
+      vigorous?: number;
+      moderate?: number;
+    };
+    spo2?: {
+      avgPercent?: number;
+      maxPercent?: number;
+      sampleCount?: number;
+      minPercent?: number;
+    };
+    distanceCm?: number;
+    floorsDescended?: number;
+    floorsClimbed?: number;
+    deviceBatteryPercent?: number;
+    dayStartTimestamp?: number;
+    totalCaloriesKcal?: number;
+    bodyBatteryDaily?: {
+      end?: number;
+      min?: number;
+      drained?: number;
+      start?: number;
+      sampleCount?: number;
+      max?: number;
+      netChange?: number;
+      charged?: number;
+    };
+    deviceMemoryFreeBytes?: number;
+    stress?: {
+      avg?: number;
+      min?: number;
+      sampleCount?: number;
+      max?: number;
+    };
+    activeCaloriesKcal?: number;
+    heartRate?: {
+      avgBpm?: number;
+      sampleCount?: number;
+      maxBpm?: number;
+      minBpm?: number;
+    };
+    steps?: number;
+  };
+}
+
+// Apply rate limiting and API key authentication middleware to all routes
+garminRouter.use(garminDeviceRateLimit());
+garminRouter.use(apiKeyAuth);
+
 garminRouter.post(
   '/daily',
-  async (req: Request<unknown, unknown, GarminDailyPayload>, res: Response, next: NextFunction) => {
+  verifyDeviceId, // Verify deviceId matches authenticated device
+  async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
-      const { deviceId, timestamp, steps, activeCalories, bodyBattery, stressAvg } = req.body;
 
-      if (!deviceId || typeof timestamp !== 'number') {
-        return res.status(400).json({ error: 'Missing or invalid deviceId/timestamp' });
+      console.log("Received Garmin daily data:", req.body);
+      const body = req.body as GarminDailyPayloadV1 | GarminDailyPayloadV2;
+      const timestamp = body.timestamp;
+
+      if (typeof timestamp !== 'number') {
+        return res.status(400).json({ error: 'Missing or invalid timestamp' });
       }
 
-      const device = await prisma.garminDevice.findUnique({
-        where: { deviceId },
-      });
+      const deviceInfo = (body as GarminDailyPayloadV2).device ?? { deviceId: (body as GarminDailyPayloadV1).deviceId };
+      const metrics = (body as GarminDailyPayloadV2).metrics ?? body;
+      const metricsV1 = metrics as GarminDailyPayloadV1;
+      const metricsV2 = metrics as GarminDailyPayloadV2['metrics'];
 
-      if (!device) {
-        console.warn('Unknown deviceId', deviceId);
-        return res.status(404).json({ error: 'Unknown device' });
-      }
+      const steps = typeof metrics.steps === 'number' ? metrics.steps : undefined;
+      const activeCaloriesKcal =
+        typeof metricsV2.activeCaloriesKcal === 'number'
+          ? metricsV2.activeCaloriesKcal
+          : typeof metricsV1.activeCalories === 'number'
+            ? metricsV1.activeCalories
+            : undefined;
+      const bodyBatteryEnd =
+        typeof metricsV2.bodyBatteryDaily?.end === 'number'
+          ? metricsV2.bodyBatteryDaily.end
+          : typeof metricsV1.bodyBattery === 'number'
+            ? metricsV1.bodyBattery
+            : undefined;
+      const stressAvg =
+        typeof metricsV2.stress?.avg === 'number'
+          ? metricsV2.stress.avg
+          : typeof metricsV1.stressAvg === 'number'
+            ? metricsV1.stressAvg
+            : undefined;
+      const dayStartTimestamp =
+        typeof metricsV2.dayStartTimestamp === 'number' ? metricsV2.dayStartTimestamp : undefined;
 
-      const userId = device.userId;
+      // Device is already authenticated and verified via middleware
+      // req.device is guaranteed to exist at this point
+      const userId = req.device!.userId;
 
       // Convert epoch seconds → Date and normalize to midnight UTC for "day"
       const dateTime = new Date(timestamp * 1000);
-      const day = new Date(dateTime);
-      day.setUTCHours(0, 0, 0, 0);
+      const dayStartDate = dayStartTimestamp ? new Date(dayStartTimestamp * 1000) : undefined;
+      const day = new Date(dayStartDate ?? dateTime);
+      if (!dayStartDate) {
+        day.setUTCHours(0, 0, 0, 0);
+      }
+
+      const deviceUpdateData: { model?: string; firmwareVersion?: string; deviceName?: string } = {};
+      if (deviceInfo?.model) {
+        deviceUpdateData.model = deviceInfo.model;
+      }
+      if (deviceInfo?.firmwareVersion) {
+        deviceUpdateData.firmwareVersion = deviceInfo.firmwareVersion;
+      }
+      if (deviceInfo?.deviceName) {
+        deviceUpdateData.deviceName = deviceInfo.deviceName;
+      }
+      if (Object.keys(deviceUpdateData).length > 0) {
+        await prisma.garminDevice.update({
+          where: { id: req.device!.id },
+          data: deviceUpdateData,
+        });
+      }
 
       await prisma.dailySummary.upsert({
         where: { userId_date: { userId, date: day } },
         update: {
           steps,
-          activeCaloriesKcal: activeCalories,
-          bodyBatteryEvening: bodyBattery ?? undefined,
+          activeCaloriesKcal,
+          totalCaloriesKcal: metricsV2.totalCaloriesKcal ?? undefined,
+          distanceCm: metricsV2.distanceCm ?? undefined,
+          floorsDescended: metricsV2.floorsDescended ?? undefined,
+          floorsClimbed: metricsV2.floorsClimbed ?? undefined,
+          deviceBatteryPercent: metricsV2.deviceBatteryPercent ?? undefined,
+          deviceMemoryFreeBytes: metricsV2.deviceMemoryFreeBytes ?? undefined,
+          activeMinutesTotal: metricsV2.activeMinutes?.total ?? undefined,
+          activeMinutesVigorous: metricsV2.activeMinutes?.vigorous ?? undefined,
+          activeMinutesModerate: metricsV2.activeMinutes?.moderate ?? undefined,
+          schemaVersion: (body as GarminDailyPayloadV2).schemaVersion ?? undefined,
+          dayStartTimestamp: dayStartDate ?? undefined,
+          bodyBatteryEvening: bodyBatteryEnd ?? undefined,
+          bodyBatteryDailyStart: metricsV2.bodyBatteryDaily?.start ?? undefined,
+          bodyBatteryDailyEnd: metricsV2.bodyBatteryDaily?.end ?? undefined,
+          bodyBatteryDailyMin: metricsV2.bodyBatteryDaily?.min ?? undefined,
+          bodyBatteryDailyMax: metricsV2.bodyBatteryDaily?.max ?? undefined,
+          bodyBatteryDailyCharged: metricsV2.bodyBatteryDaily?.charged ?? undefined,
+          bodyBatteryDailyDrained: metricsV2.bodyBatteryDaily?.drained ?? undefined,
+          bodyBatteryDailyNetChange: metricsV2.bodyBatteryDaily?.netChange ?? undefined,
+          bodyBatteryDailySampleCount: metricsV2.bodyBatteryDaily?.sampleCount ?? undefined,
           stressAvg: stressAvg ?? undefined,
+          stressMin: metricsV2.stress?.min ?? undefined,
+          stressMax: metricsV2.stress?.max ?? undefined,
+          stressSampleCount: metricsV2.stress?.sampleCount ?? undefined,
+          heartRateAvgBpm: metricsV2.heartRate?.avgBpm ?? undefined,
+          heartRateMinBpm: metricsV2.heartRate?.minBpm ?? undefined,
+          heartRateMaxBpm: metricsV2.heartRate?.maxBpm ?? undefined,
+          heartRateSampleCount: metricsV2.heartRate?.sampleCount ?? undefined,
+          spo2AvgPercent: metricsV2.spo2?.avgPercent ?? undefined,
+          spo2MinPercent: metricsV2.spo2?.minPercent ?? undefined,
+          spo2MaxPercent: metricsV2.spo2?.maxPercent ?? undefined,
+          spo2SampleCount: metricsV2.spo2?.sampleCount ?? undefined,
         },
         create: {
           userId,
           date: day,
           timezone: 'Europe/Istanbul', // TODO: later per-user setting
           steps,
-          activeCaloriesKcal: activeCalories,
-          bodyBatteryEvening: bodyBattery ?? undefined,
+          activeCaloriesKcal,
+          totalCaloriesKcal: metricsV2.totalCaloriesKcal ?? undefined,
+          distanceCm: metricsV2.distanceCm ?? undefined,
+          floorsDescended: metricsV2.floorsDescended ?? undefined,
+          floorsClimbed: metricsV2.floorsClimbed ?? undefined,
+          deviceBatteryPercent: metricsV2.deviceBatteryPercent ?? undefined,
+          deviceMemoryFreeBytes: metricsV2.deviceMemoryFreeBytes ?? undefined,
+          activeMinutesTotal: metricsV2.activeMinutes?.total ?? undefined,
+          activeMinutesVigorous: metricsV2.activeMinutes?.vigorous ?? undefined,
+          activeMinutesModerate: metricsV2.activeMinutes?.moderate ?? undefined,
+          schemaVersion: (body as GarminDailyPayloadV2).schemaVersion ?? undefined,
+          dayStartTimestamp: dayStartDate ?? undefined,
+          bodyBatteryEvening: bodyBatteryEnd ?? undefined,
+          bodyBatteryDailyStart: metricsV2.bodyBatteryDaily?.start ?? undefined,
+          bodyBatteryDailyEnd: metricsV2.bodyBatteryDaily?.end ?? undefined,
+          bodyBatteryDailyMin: metricsV2.bodyBatteryDaily?.min ?? undefined,
+          bodyBatteryDailyMax: metricsV2.bodyBatteryDaily?.max ?? undefined,
+          bodyBatteryDailyCharged: metricsV2.bodyBatteryDaily?.charged ?? undefined,
+          bodyBatteryDailyDrained: metricsV2.bodyBatteryDaily?.drained ?? undefined,
+          bodyBatteryDailyNetChange: metricsV2.bodyBatteryDaily?.netChange ?? undefined,
+          bodyBatteryDailySampleCount: metricsV2.bodyBatteryDaily?.sampleCount ?? undefined,
           stressAvg: stressAvg ?? undefined,
+          stressMin: metricsV2.stress?.min ?? undefined,
+          stressMax: metricsV2.stress?.max ?? undefined,
+          stressSampleCount: metricsV2.stress?.sampleCount ?? undefined,
+          heartRateAvgBpm: metricsV2.heartRate?.avgBpm ?? undefined,
+          heartRateMinBpm: metricsV2.heartRate?.minBpm ?? undefined,
+          heartRateMaxBpm: metricsV2.heartRate?.maxBpm ?? undefined,
+          heartRateSampleCount: metricsV2.heartRate?.sampleCount ?? undefined,
+          spo2AvgPercent: metricsV2.spo2?.avgPercent ?? undefined,
+          spo2MinPercent: metricsV2.spo2?.minPercent ?? undefined,
+          spo2MaxPercent: metricsV2.spo2?.maxPercent ?? undefined,
+          spo2SampleCount: metricsV2.spo2?.sampleCount ?? undefined,
         },
       });
 
