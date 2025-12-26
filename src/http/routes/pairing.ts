@@ -122,7 +122,10 @@ pairingRouter.post(
         if (existingDevice.userId === pairingToken.userId) {
           const providerAccount = await prisma.providerAccount.upsert({
             where: { userId_provider: { userId: existingDevice.userId, provider: "GARMIN" } },
-            update: {},
+            update: {
+              status: "ACTIVE",
+              scopes: ["write"],
+            },
             create: {
               userId: existingDevice.userId,
               provider: "GARMIN",
@@ -181,7 +184,10 @@ pairingRouter.post(
 
       const providerAccount = await prisma.providerAccount.upsert({
         where: { userId_provider: { userId: pairingToken.userId, provider: "GARMIN" } },
-        update: {},
+        update: {
+          status: "ACTIVE",
+          scopes: ["write"],
+        },
         create: {
           userId: pairingToken.userId,
           provider: "GARMIN",

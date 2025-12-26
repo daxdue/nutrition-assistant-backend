@@ -140,10 +140,15 @@ garminRouter.post(
 
       const providerAccount = await prisma.providerAccount.upsert({
         where: { userId_provider: { userId, provider: "GARMIN" } },
-        update: {},
+        update: {
+          status: "ACTIVE",
+          scopes: ["write"],
+        },
         create: {
           userId,
           provider: "GARMIN",
+          status: "ACTIVE",
+          scopes: ["write"],
         },
       });
 
