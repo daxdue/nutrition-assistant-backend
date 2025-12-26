@@ -1,6 +1,8 @@
 // src/http/routes/garmin.ts
 import { Router, Response, NextFunction } from 'express';
 import { prisma } from '../../db/client';
+import { DateTime } from "luxon";
+import { DEFAULT_TIMEZONE, getStartOfDayUtcFromEpochSeconds } from "../../utils/timezone";
 import { apiKeyAuth, verifyDeviceId, AuthenticatedRequest } from '../middleware/apiKeyAuth';
 import { garminDeviceRateLimit } from '../middleware/rateLimit';
 
@@ -124,12 +126,16 @@ garminRouter.post(
       const userId = req.device!.userId;
 
       // Convert epoch seconds → Date and normalize to midnight UTC for "day"
-      const dateTime = new Date(timestamp * 1000);
-      const dayStartDate = dayStartTimestamp ? new Date(dayStartTimestamp * 1000) : undefined;
-      const day = new Date(dayStartDate ?? dateTime);
-      if (!dayStartDate) {
-        day.setUTCHours(0, 0, 0, 0);
-      }
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { timezone: true },
+      });
+      const userTimezone = user?.timezone ?? DEFAULT_TIMEZONE;
+
+      const dayStartUtc = getStartOfDayUtcFromEpochSeconds(timestamp, userTimezone);
+      const dayStartDate = dayStartTimestamp
+        ? DateTime.fromSeconds(dayStartTimestamp, { zone: "utc" }).toJSDate()
+        : undefined;
 
       const deviceUpdateData: { model?: string; firmwareVersion?: string; deviceName?: string } = {};
       if (deviceInfo?.model) {
@@ -149,8 +155,9 @@ garminRouter.post(
       }
 
       await prisma.dailySummary.upsert({
-        where: { userId_date: { userId, date: day } },
+        where: { userId_date: { userId, date: dayStartUtc } },
         update: {
+          timezone: userTimezone,
           steps,
           activeCaloriesKcal,
           totalCaloriesKcal: metricsV2.totalCaloriesKcal ?? undefined,
@@ -188,8 +195,8 @@ garminRouter.post(
         },
         create: {
           userId,
-          date: day,
-          timezone: 'Europe/Istanbul', // TODO: later per-user setting
+          date: dayStartUtc,
+          timezone: userTimezone,
           steps,
           activeCaloriesKcal,
           totalCaloriesKcal: metricsV2.totalCaloriesKcal ?? undefined,

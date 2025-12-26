@@ -13,6 +13,19 @@ interface ProcessMealPhotoArgs {
     caption: string;
 };
 
+function sumMacro(items: Array<{ [key: string]: unknown }>, key: string): number | null {
+    let total = 0;
+    let hasAny = false;
+    for (const item of items) {
+        const value = item?.[key];
+        if (typeof value === "number" && Number.isFinite(value)) {
+            total += value;
+            hasAny = true;
+        }
+    }
+    return hasAny ? total : null;
+}
+
 export async function processMealPhotoTask({
     imageUrl,
     userId,
@@ -56,6 +69,12 @@ export async function processMealPhotoTask({
             return;
         }
 
+        const items = Array.isArray(analysis.items) ? analysis.items : [];
+        const energyKcal = typeof analysis.total_estimated_kcal === "number" ? Math.round(analysis.total_estimated_kcal) : null;
+        const proteinG = sumMacro(items as Array<{ [key: string]: unknown }>, "protein_g");
+        const carbsG = sumMacro(items as Array<{ [key: string]: unknown }>, "carbs_g");
+        const fatG = sumMacro(items as Array<{ [key: string]: unknown }>, "fat_g");
+
         await prisma.foodEntry.create({
             data: {
                 userId,
@@ -63,6 +82,10 @@ export async function processMealPhotoTask({
                 imagePathOrUrl: imageUrl,
                 captionText: caption ?? null,
                 aiParsedJson: analysis,     // result from OpenAI (object, not string)
+                energyKcal,
+                proteinG,
+                carbsG,
+                fatG,
             },
         });
 

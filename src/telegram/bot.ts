@@ -6,6 +6,8 @@ import axios from 'axios';
 import { prisma } from '../db/client';
 import { processMealPhotoTask } from '../modules/tasks/processMealPhotoTask';
 import { generatePairingToken } from '../services/garmin.service';
+import { ensureDailyAiReportForUserDay } from '../modules/dailySummary/dailySummary.service';
+import { DEFAULT_TIMEZONE, getStartOfDayUtcFromDate } from '../utils/timezone';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -272,6 +274,47 @@ bot.command("privacy", async (ctx) => {
   );
 });
 
+bot.command("summary", async (ctx) => {
+  const user = await getOrCreateUser(ctx);
+
+  if (!user) {
+    return ctx.reply(
+      "🚫 You are not authorized to use this bot.\n" +
+      "Use /start to submit an access request."
+    );
+  }
+
+  if (user.status !== "ACTIVE") {
+    return ctx.reply(
+      "⏳ Your access request is pending.\n" +
+      "You’ll be able to view summaries once an admin approves it."
+    );
+  }
+
+  try {
+    const timezone = user.timezone ?? DEFAULT_TIMEZONE;
+    const dayStartUtc = getStartOfDayUtcFromDate(new Date(), timezone);
+    const report = await ensureDailyAiReportForUserDay({
+      userId: user.id,
+      timezone,
+      dayStartUtc,
+    });
+
+    if (!report.messageText) {
+      return ctx.reply("No summary is available yet for today.");
+    }
+
+    await ctx.reply(report.messageText);
+    await prisma.dailyAiReport.update({
+      where: { id: report.id },
+      data: { sentAt: new Date() },
+    });
+  } catch (error) {
+    console.error("Failed to generate summary:", error);
+    await ctx.reply("Sorry, I couldn't generate your summary right now.");
+  }
+});
+
 bot.command("pairGarminWatch", async (ctx) => {
   const user = await getOrCreateUser(ctx);
 
@@ -444,6 +487,7 @@ export async function launchBot() {
     { command: 'pair', description: 'Pair Garmin watch' },
     { command: 'stats', description: 'Open nutrition stats' },
     { command: 'privacy', description: 'View privacy policy' },
+    { command: 'summary', description: 'Daily summary' },
     // later: { command: 'delete', description: 'Delete my data' },
   ]);
 

@@ -32,6 +32,7 @@ model User {
   createdAt        DateTime      @default(now())
 
   status           UserStatus  @default(INACTIVE)
+  timezone         String      @default("Europe/Istanbul")
 
   dailySummaries   DailySummary[]
   garminDevices    GarminDevice[]
@@ -49,6 +50,10 @@ model FoodEntry {
   imagePathOrUrl String
   captionText    String?
   aiParsedJson   Json?
+  energyKcal     Int?
+  proteinG       Float?
+  carbsG         Float?
+  fatG           Float?
 
   @@index([userId, timestamp])
 }
@@ -75,6 +80,18 @@ model DailySummary {
   timezone              String?
   schemaVersion         String?
   dayStartTimestamp     DateTime?
+
+  // nutrition rollups
+  mealsCount            Int?
+  nutritionKcal         Int?
+  nutritionProteinG     Float?
+  nutritionCarbsG       Float?
+  nutritionFatG         Float?
+  firstMealAt           DateTime?
+  lastMealAt            DateTime?
+  missingMacrosCount    Int?
+  netKcalEstimate       Int?
+  notes                 String?
 
   // movement
   steps                 Int?
@@ -115,10 +132,27 @@ model DailySummary {
   spo2MaxPercent        Float?
   spo2SampleCount       Int?
 
+  aiReport              DailyAiReport?
+
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 
   @@unique([userId, date])
+}
+
+model DailyAiReport {
+  id             String       @id @default(uuid())
+  dailySummary   DailySummary @relation(fields: [dailySummaryId], references: [id], onDelete: Cascade)
+  dailySummaryId String       @unique
+
+  model          String
+  promptVersion  String
+  inputJson      Json
+  outputJson     Json
+  messageText    String?
+  sentAt         DateTime?
+
+  createdAt      DateTime @default(now())
 }
 
 model AbuseEvent {
