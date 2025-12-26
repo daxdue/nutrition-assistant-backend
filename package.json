@@ -8,7 +8,7 @@
     "dev": "ts-node-dev --respawn --transpile-only src/app.ts",
     "build": "tsc",
     "start": "node dist/app.js",
-    "prisma:migrate": "prisma migrate dev",
+    "prisma:migrate": "prisma migrate deploy",
     "prisma:generate": "prisma generate",
     "backfill:providers": "node scripts/backfillProviders.js",
     "railway:predeploy": "npm run prisma:migrate && npm run prisma:generate && npm run backfill:providers"
