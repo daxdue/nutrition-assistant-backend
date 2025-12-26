@@ -191,45 +191,73 @@ garminRouter.post(
         });
       }
 
+      const existingSummary = await prisma.dailySummary.findUnique({
+        where: { userId_date: { userId, date: dayStartUtc } },
+        select: {
+          providersPresent: true,
+          metricSources: true,
+          providerPrimary: true,
+        },
+      });
+
+      const existingProviders = Array.isArray(existingSummary?.providersPresent)
+        ? (existingSummary?.providersPresent as string[])
+        : [];
+      const providersPresent = Array.from(new Set([...existingProviders, "GARMIN"]));
+
+      const existingMetricSources =
+        existingSummary?.metricSources && typeof existingSummary.metricSources === "object" && !Array.isArray(existingSummary.metricSources)
+          ? (existingSummary.metricSources as Record<string, string>)
+          : {};
+
+      const metricSources: Record<string, string> = {};
+      const setSource = (key: string, value: unknown) => {
+        if (value !== undefined && value !== null) {
+          metricSources[key] = "GARMIN";
+        }
+      };
+
+      setSource("steps", steps);
+      setSource("activeCaloriesKcal", activeCaloriesKcal);
+      setSource("totalCaloriesKcal", metricsV2.totalCaloriesKcal);
+      setSource("distanceCm", metricsV2.distanceCm);
+      setSource("floorsDescended", metricsV2.floorsDescended);
+      setSource("floorsClimbed", metricsV2.floorsClimbed);
+      setSource("deviceBatteryPercent", metricsV2.deviceBatteryPercent);
+      setSource("deviceMemoryFreeBytes", metricsV2.deviceMemoryFreeBytes);
+      setSource("activeMinutesTotal", metricsV2.activeMinutes?.total);
+      setSource("activeMinutesVigorous", metricsV2.activeMinutes?.vigorous);
+      setSource("activeMinutesModerate", metricsV2.activeMinutes?.moderate);
+      setSource("bodyBatteryDailyStart", metricsV2.bodyBatteryDaily?.start);
+      setSource("bodyBatteryDailyEnd", metricsV2.bodyBatteryDaily?.end);
+      setSource("bodyBatteryDailyMin", metricsV2.bodyBatteryDaily?.min);
+      setSource("bodyBatteryDailyMax", metricsV2.bodyBatteryDaily?.max);
+      setSource("bodyBatteryDailyCharged", metricsV2.bodyBatteryDaily?.charged);
+      setSource("bodyBatteryDailyDrained", metricsV2.bodyBatteryDaily?.drained);
+      setSource("bodyBatteryDailyNetChange", metricsV2.bodyBatteryDaily?.netChange);
+      setSource("bodyBatteryDailySampleCount", metricsV2.bodyBatteryDaily?.sampleCount);
+      setSource("stressAvg", stressAvg);
+      setSource("stressMin", metricsV2.stress?.min);
+      setSource("stressMax", metricsV2.stress?.max);
+      setSource("stressSampleCount", metricsV2.stress?.sampleCount);
+      setSource("heartRateAvgBpm", metricsV2.heartRate?.avgBpm);
+      setSource("heartRateMinBpm", metricsV2.heartRate?.minBpm);
+      setSource("heartRateMaxBpm", metricsV2.heartRate?.maxBpm);
+      setSource("heartRateSampleCount", metricsV2.heartRate?.sampleCount);
+      setSource("spo2AvgPercent", metricsV2.spo2?.avgPercent);
+      setSource("spo2MinPercent", metricsV2.spo2?.minPercent);
+      setSource("spo2MaxPercent", metricsV2.spo2?.maxPercent);
+      setSource("spo2SampleCount", metricsV2.spo2?.sampleCount);
+
+      const mergedMetricSources = { ...existingMetricSources, ...metricSources };
+
       await prisma.dailySummary.upsert({
         where: { userId_date: { userId, date: dayStartUtc } },
         update: {
           timezone: userTimezone,
-          providersPresent: ["GARMIN"],
-          providerPrimary: "GARMIN",
-          metricSources: {
-            steps: "GARMIN",
-            activeCaloriesKcal: "GARMIN",
-            totalCaloriesKcal: "GARMIN",
-            distanceCm: "GARMIN",
-            floorsDescended: "GARMIN",
-            floorsClimbed: "GARMIN",
-            deviceBatteryPercent: "GARMIN",
-            deviceMemoryFreeBytes: "GARMIN",
-            activeMinutesTotal: "GARMIN",
-            activeMinutesVigorous: "GARMIN",
-            activeMinutesModerate: "GARMIN",
-            bodyBatteryDailyStart: "GARMIN",
-            bodyBatteryDailyEnd: "GARMIN",
-            bodyBatteryDailyMin: "GARMIN",
-            bodyBatteryDailyMax: "GARMIN",
-            bodyBatteryDailyCharged: "GARMIN",
-            bodyBatteryDailyDrained: "GARMIN",
-            bodyBatteryDailyNetChange: "GARMIN",
-            bodyBatteryDailySampleCount: "GARMIN",
-            stressAvg: "GARMIN",
-            stressMin: "GARMIN",
-            stressMax: "GARMIN",
-            stressSampleCount: "GARMIN",
-            heartRateAvgBpm: "GARMIN",
-            heartRateMinBpm: "GARMIN",
-            heartRateMaxBpm: "GARMIN",
-            heartRateSampleCount: "GARMIN",
-            spo2AvgPercent: "GARMIN",
-            spo2MinPercent: "GARMIN",
-            spo2MaxPercent: "GARMIN",
-            spo2SampleCount: "GARMIN",
-          },
+          providersPresent,
+          providerPrimary: existingSummary?.providerPrimary ?? "GARMIN",
+          metricSources: mergedMetricSources,
           steps,
           activeCaloriesKcal,
           totalCaloriesKcal: metricsV2.totalCaloriesKcal ?? undefined,
@@ -269,41 +297,9 @@ garminRouter.post(
           userId,
           date: dayStartUtc,
           timezone: userTimezone,
-          providersPresent: ["GARMIN"],
+          providersPresent,
           providerPrimary: "GARMIN",
-          metricSources: {
-            steps: "GARMIN",
-            activeCaloriesKcal: "GARMIN",
-            totalCaloriesKcal: "GARMIN",
-            distanceCm: "GARMIN",
-            floorsDescended: "GARMIN",
-            floorsClimbed: "GARMIN",
-            deviceBatteryPercent: "GARMIN",
-            deviceMemoryFreeBytes: "GARMIN",
-            activeMinutesTotal: "GARMIN",
-            activeMinutesVigorous: "GARMIN",
-            activeMinutesModerate: "GARMIN",
-            bodyBatteryDailyStart: "GARMIN",
-            bodyBatteryDailyEnd: "GARMIN",
-            bodyBatteryDailyMin: "GARMIN",
-            bodyBatteryDailyMax: "GARMIN",
-            bodyBatteryDailyCharged: "GARMIN",
-            bodyBatteryDailyDrained: "GARMIN",
-            bodyBatteryDailyNetChange: "GARMIN",
-            bodyBatteryDailySampleCount: "GARMIN",
-            stressAvg: "GARMIN",
-            stressMin: "GARMIN",
-            stressMax: "GARMIN",
-            stressSampleCount: "GARMIN",
-            heartRateAvgBpm: "GARMIN",
-            heartRateMinBpm: "GARMIN",
-            heartRateMaxBpm: "GARMIN",
-            heartRateSampleCount: "GARMIN",
-            spo2AvgPercent: "GARMIN",
-            spo2MinPercent: "GARMIN",
-            spo2MaxPercent: "GARMIN",
-            spo2SampleCount: "GARMIN",
-          },
+          metricSources: mergedMetricSources,
           steps,
           activeCaloriesKcal,
           totalCaloriesKcal: metricsV2.totalCaloriesKcal ?? undefined,

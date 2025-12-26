@@ -45,10 +45,15 @@ export async function apiKeyAuth(
       include: { providerAccount: true },
     });
 
-    if (providerDevice && providerDevice.providerAccount.provider === "GARMIN") {
+    if (
+      providerDevice &&
+      providerDevice.providerAccount.provider === "GARMIN" &&
+      providerDevice.providerAccount.status === "ACTIVE" &&
+      providerDevice.externalDeviceId
+    ) {
       req.device = {
         id: providerDevice.id,
-        deviceId: providerDevice.externalDeviceId ?? "",
+        deviceId: providerDevice.externalDeviceId,
         userId: providerDevice.providerAccount.userId,
         apiKey: providerDevice.deviceApiKey ?? apiKey,
         model: providerDevice.model,

@@ -11,7 +11,7 @@
     "prisma:migrate": "prisma migrate deploy",
     "prisma:generate": "prisma generate",
     "backfill:providers": "node scripts/backfillProviders.js",
-    "railway:predeploy": "prisma migrate deploy && prisma generate && npm run backfill:providers"
+    "railway:predeploy": "npm run prisma:generate && npm run prisma:migrate && npm run backfill:providers"
   },
   "author": "daxdue",
   "license": "ISC",
