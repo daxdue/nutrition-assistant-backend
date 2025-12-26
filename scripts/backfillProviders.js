@@ -4,6 +4,17 @@ const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 
 async function backfillProviders() {
+  const enumCheck = await prisma.$queryRaw`
+    SELECT 1
+    FROM pg_type
+    WHERE typname = 'ProviderAccountStatus'
+    LIMIT 1
+  `;
+  if (!Array.isArray(enumCheck) || enumCheck.length === 0) {
+    console.warn("ProviderAccountStatus enum not found. Skipping backfill (run migrations first).");
+    return;
+  }
+
   const devices = await prisma.garminDevice.findMany();
   let accountsCreated = 0;
   let devicesUpserted = 0;
