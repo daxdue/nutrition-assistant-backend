@@ -4,6 +4,7 @@ import { prisma } from "../../db/client";
 import { bot } from "../../telegram/bot";
 import { formatNutritionSummary } from "../../utils/formatNutrition";
 import { recordAbuseAndMaybeBan } from "../../services/abuse.service";
+import { NutritionItem } from "../../interfaces/NutritionItem";
 
 interface ProcessMealPhotoArgs {
     imageUrl: string;
@@ -13,11 +14,11 @@ interface ProcessMealPhotoArgs {
     caption: string;
 };
 
-function sumMacro(items: Array<{ [key: string]: unknown }>, key: string): number | null {
+function sumMacro(items: NutritionItem[], key: "protein_g" | "carbs_g" | "fat_g"): number | null {
     let total = 0;
     let hasAny = false;
     for (const item of items) {
-        const value = item?.[key];
+        const value = item[key];
         if (typeof value === "number" && Number.isFinite(value)) {
             total += value;
             hasAny = true;
@@ -69,11 +70,11 @@ export async function processMealPhotoTask({
             return;
         }
 
-        const items = Array.isArray(analysis.items) ? analysis.items : [];
+        const items: NutritionItem[] = Array.isArray(analysis.items) ? analysis.items : [];
         const energyKcal = typeof analysis.total_estimated_kcal === "number" ? Math.round(analysis.total_estimated_kcal) : null;
-        const proteinG = sumMacro(items as Array<{ [key: string]: unknown }>, "protein_g");
-        const carbsG = sumMacro(items as Array<{ [key: string]: unknown }>, "carbs_g");
-        const fatG = sumMacro(items as Array<{ [key: string]: unknown }>, "fat_g");
+        const proteinG = sumMacro(items, "protein_g");
+        const carbsG = sumMacro(items, "carbs_g");
+        const fatG = sumMacro(items, "fat_g");
 
         await prisma.foodEntry.create({
             data: {

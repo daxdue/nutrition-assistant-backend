@@ -1,4 +1,5 @@
 import { DateTime } from "luxon";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../../db/client";
 import { DAILY_REPORT_PROMPT_VERSION, generateDailyAiReport } from "../ai/dailyReport.service";
 import { DailyAiReportOutput } from "./dailyReport.types";
@@ -612,16 +613,16 @@ export async function ensureDailyAiReportForUserDay({
         update: {
             model: aiOutput ? "gpt-4.1-mini" : "unknown",
             promptVersion: DAILY_REPORT_PROMPT_VERSION,
-            inputJson,
-            outputJson: finalOutput,
+            inputJson: inputJson as Prisma.InputJsonValue,
+            outputJson: finalOutput as unknown as Prisma.InputJsonValue,
             messageText,
         },
         create: {
             dailySummaryId: dailySummary.id,
             model: "gpt-4.1-mini",
             promptVersion: DAILY_REPORT_PROMPT_VERSION,
-            inputJson,
-            outputJson: finalOutput,
+            inputJson: inputJson as Prisma.InputJsonValue,
+            outputJson: finalOutput as unknown as Prisma.InputJsonValue,
             messageText,
         },
     });
