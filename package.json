@@ -9,7 +9,9 @@
     "build": "tsc",
     "start": "node dist/app.js",
     "prisma:migrate": "prisma migrate dev",
-    "prisma:generate": "prisma generate"
+    "prisma:generate": "prisma generate",
+    "backfill:providers": "node scripts/backfillProviders.js",
+    "railway:predeploy": "npm run prisma:migrate && npm run prisma:generate && npm run backfill:providers"
   },
   "author": "daxdue",
   "license": "ISC",
