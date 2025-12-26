@@ -28,13 +28,14 @@ garminRouter.post(
   verifyDeviceId, // Verify deviceId matches authenticated device
   async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     try {
+
+      console.log("Received Garmin daily data:", req.body);
       const { timestamp, steps, activeCalories, bodyBattery, stressAvg } = req.body;
 
       if (typeof timestamp !== 'number') {
         return res.status(400).json({ error: 'Missing or invalid timestamp' });
       }
 
-      console.log("Received Garmin daily data:", req.body);
       // Device is already authenticated and verified via middleware
       // req.device is guaranteed to exist at this point
       const userId = req.device!.userId;
