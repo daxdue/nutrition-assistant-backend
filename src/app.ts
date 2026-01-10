@@ -2,6 +2,7 @@
 import 'dotenv/config';
 import { createServer } from './http/server';
 import { launchBot } from './telegram/bot';
+import { startDailySummaryCron } from './modules/tasks/dailySummaryCron';
 
 async function main() {
   const app = createServer();
@@ -12,6 +13,7 @@ async function main() {
   });
 
   await launchBot();
+  startDailySummaryCron();
 }
 
 main().catch((err) => {

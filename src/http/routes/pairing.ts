@@ -120,6 +120,39 @@ pairingRouter.post(
       if (existingDevice) {
         // If already paired to the same user, just return success with API key
         if (existingDevice.userId === pairingToken.userId) {
+          const providerAccount = await prisma.providerAccount.upsert({
+            where: { userId_provider: { userId: existingDevice.userId, provider: "GARMIN" } },
+            update: {
+              status: "ACTIVE",
+              scopes: ["write"],
+            },
+            create: {
+              userId: existingDevice.userId,
+              provider: "GARMIN",
+              scopes: ["write"],
+              status: "ACTIVE",
+            },
+          });
+
+          await prisma.providerDevice.upsert({
+            where: {
+              providerAccountId_externalDeviceId: {
+                providerAccountId: providerAccount.id,
+                externalDeviceId: existingDevice.deviceId,
+              },
+            },
+            update: {
+              deviceApiKey: existingDevice.apiKey,
+              model: existingDevice.model ?? undefined,
+            },
+            create: {
+              providerAccountId: providerAccount.id,
+              externalDeviceId: existingDevice.deviceId,
+              deviceApiKey: existingDevice.apiKey,
+              model: existingDevice.model ?? undefined,
+            },
+          });
+
           // Mark token as used
           await prisma.pairingToken.update({
             where: { id: pairingToken.id },
@@ -145,6 +178,39 @@ pairingRouter.post(
           deviceId,
           userId: pairingToken.userId,
           apiKey,
+          model: model || null,
+        },
+      });
+
+      const providerAccount = await prisma.providerAccount.upsert({
+        where: { userId_provider: { userId: pairingToken.userId, provider: "GARMIN" } },
+        update: {
+          status: "ACTIVE",
+          scopes: ["write"],
+        },
+        create: {
+          userId: pairingToken.userId,
+          provider: "GARMIN",
+          scopes: ["write"],
+          status: "ACTIVE",
+        },
+      });
+
+      await prisma.providerDevice.upsert({
+        where: {
+          providerAccountId_externalDeviceId: {
+            providerAccountId: providerAccount.id,
+            externalDeviceId: deviceId,
+          },
+        },
+        update: {
+          deviceApiKey: apiKey,
+          model: model || null,
+        },
+        create: {
+          providerAccountId: providerAccount.id,
+          externalDeviceId: deviceId,
+          deviceApiKey: apiKey,
           model: model || null,
         },
       });

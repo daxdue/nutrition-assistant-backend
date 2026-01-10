@@ -9,6 +9,7 @@ export interface AuthenticatedRequest extends Request {
     userId: string;
     apiKey: string;
     model: string | null;
+    provider: "GARMIN";
   };
 }
 
@@ -39,7 +40,29 @@ export async function apiKeyAuth(
       return;
     }
 
-    // Find device by API key
+    const providerDevice = await prisma.providerDevice.findUnique({
+      where: { deviceApiKey: apiKey },
+      include: { providerAccount: true },
+    });
+
+    if (
+      providerDevice &&
+      providerDevice.providerAccount.provider === "GARMIN" &&
+      providerDevice.providerAccount.status === "ACTIVE" &&
+      providerDevice.externalDeviceId
+    ) {
+      req.device = {
+        id: providerDevice.id,
+        deviceId: providerDevice.externalDeviceId,
+        userId: providerDevice.providerAccount.userId,
+        apiKey: providerDevice.deviceApiKey ?? apiKey,
+        model: providerDevice.model,
+        provider: "GARMIN",
+      };
+      return next();
+    }
+
+    // Fallback: legacy GarminDevice
     const device = await prisma.garminDevice.findUnique({
       where: { apiKey },
     });
@@ -62,6 +85,7 @@ export async function apiKeyAuth(
       userId: device.userId,
       apiKey: device.apiKey,
       model: device.model,
+      provider: "GARMIN",
     };
 
     next();

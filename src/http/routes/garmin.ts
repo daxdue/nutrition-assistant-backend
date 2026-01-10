@@ -1,6 +1,9 @@
 // src/http/routes/garmin.ts
 import { Router, Response, NextFunction } from 'express';
+import crypto from "crypto";
 import { prisma } from '../../db/client';
+import { DateTime } from "luxon";
+import { DEFAULT_TIMEZONE, getStartOfDayUtcFromEpochSeconds } from "../../utils/timezone";
 import { apiKeyAuth, verifyDeviceId, AuthenticatedRequest } from '../middleware/apiKeyAuth';
 import { garminDeviceRateLimit } from '../middleware/rateLimit';
 
@@ -124,11 +127,56 @@ garminRouter.post(
       const userId = req.device!.userId;
 
       // Convert epoch seconds → Date and normalize to midnight UTC for "day"
-      const dateTime = new Date(timestamp * 1000);
-      const dayStartDate = dayStartTimestamp ? new Date(dayStartTimestamp * 1000) : undefined;
-      const day = new Date(dayStartDate ?? dateTime);
-      if (!dayStartDate) {
-        day.setUTCHours(0, 0, 0, 0);
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { timezone: true },
+      });
+      const userTimezone = user?.timezone ?? DEFAULT_TIMEZONE;
+
+      const dayStartUtc = getStartOfDayUtcFromEpochSeconds(timestamp, userTimezone);
+      const dayStartDate = dayStartTimestamp
+        ? DateTime.fromSeconds(dayStartTimestamp, { zone: "utc" }).toJSDate()
+        : undefined;
+
+      const providerAccount = await prisma.providerAccount.upsert({
+        where: { userId_provider: { userId, provider: "GARMIN" } },
+        update: {
+          status: "ACTIVE",
+          scopes: ["write"],
+        },
+        create: {
+          userId,
+          provider: "GARMIN",
+          status: "ACTIVE",
+          scopes: ["write"],
+        },
+      });
+
+      const deviceExternalId = deviceInfo?.deviceId ?? req.device?.deviceId ?? null;
+      if (deviceExternalId) {
+        const deviceApiKey = req.device?.apiKey ?? undefined;
+        await prisma.providerDevice.upsert({
+          where: {
+            providerAccountId_externalDeviceId: {
+              providerAccountId: providerAccount.id,
+              externalDeviceId: deviceExternalId,
+            },
+          },
+          update: {
+            deviceApiKey,
+            model: deviceInfo?.model ?? undefined,
+            firmwareVersion: deviceInfo?.firmwareVersion ?? undefined,
+            deviceName: deviceInfo?.deviceName ?? undefined,
+          },
+          create: {
+            providerAccountId: providerAccount.id,
+            externalDeviceId: deviceExternalId,
+            deviceApiKey,
+            model: deviceInfo?.model ?? undefined,
+            firmwareVersion: deviceInfo?.firmwareVersion ?? undefined,
+            deviceName: deviceInfo?.deviceName ?? undefined,
+          },
+        });
       }
 
       const deviceUpdateData: { model?: string; firmwareVersion?: string; deviceName?: string } = {};
@@ -142,15 +190,79 @@ garminRouter.post(
         deviceUpdateData.deviceName = deviceInfo.deviceName;
       }
       if (Object.keys(deviceUpdateData).length > 0) {
-        await prisma.garminDevice.update({
-          where: { id: req.device!.id },
+        await prisma.garminDevice.updateMany({
+          where: { deviceId: req.device!.deviceId },
           data: deviceUpdateData,
         });
       }
 
+      const existingSummary = await prisma.dailySummary.findUnique({
+        where: { userId_date: { userId, date: dayStartUtc } },
+        select: {
+          providersPresent: true,
+          metricSources: true,
+          providerPrimary: true,
+        },
+      });
+
+      const existingProviders = Array.isArray(existingSummary?.providersPresent)
+        ? (existingSummary?.providersPresent as string[])
+        : [];
+      const providersPresent = Array.from(new Set([...existingProviders, "GARMIN"]));
+
+      const existingMetricSources =
+        existingSummary?.metricSources && typeof existingSummary.metricSources === "object" && !Array.isArray(existingSummary.metricSources)
+          ? (existingSummary.metricSources as Record<string, string>)
+          : {};
+
+      const metricSources: Record<string, string> = {};
+      const setSource = (key: string, value: unknown) => {
+        if (value !== undefined && value !== null) {
+          metricSources[key] = "GARMIN";
+        }
+      };
+
+      setSource("steps", steps);
+      setSource("activeCaloriesKcal", activeCaloriesKcal);
+      setSource("totalCaloriesKcal", metricsV2.totalCaloriesKcal);
+      setSource("distanceCm", metricsV2.distanceCm);
+      setSource("floorsDescended", metricsV2.floorsDescended);
+      setSource("floorsClimbed", metricsV2.floorsClimbed);
+      setSource("deviceBatteryPercent", metricsV2.deviceBatteryPercent);
+      setSource("deviceMemoryFreeBytes", metricsV2.deviceMemoryFreeBytes);
+      setSource("activeMinutesTotal", metricsV2.activeMinutes?.total);
+      setSource("activeMinutesVigorous", metricsV2.activeMinutes?.vigorous);
+      setSource("activeMinutesModerate", metricsV2.activeMinutes?.moderate);
+      setSource("bodyBatteryDailyStart", metricsV2.bodyBatteryDaily?.start);
+      setSource("bodyBatteryDailyEnd", metricsV2.bodyBatteryDaily?.end);
+      setSource("bodyBatteryDailyMin", metricsV2.bodyBatteryDaily?.min);
+      setSource("bodyBatteryDailyMax", metricsV2.bodyBatteryDaily?.max);
+      setSource("bodyBatteryDailyCharged", metricsV2.bodyBatteryDaily?.charged);
+      setSource("bodyBatteryDailyDrained", metricsV2.bodyBatteryDaily?.drained);
+      setSource("bodyBatteryDailyNetChange", metricsV2.bodyBatteryDaily?.netChange);
+      setSource("bodyBatteryDailySampleCount", metricsV2.bodyBatteryDaily?.sampleCount);
+      setSource("stressAvg", stressAvg);
+      setSource("stressMin", metricsV2.stress?.min);
+      setSource("stressMax", metricsV2.stress?.max);
+      setSource("stressSampleCount", metricsV2.stress?.sampleCount);
+      setSource("heartRateAvgBpm", metricsV2.heartRate?.avgBpm);
+      setSource("heartRateMinBpm", metricsV2.heartRate?.minBpm);
+      setSource("heartRateMaxBpm", metricsV2.heartRate?.maxBpm);
+      setSource("heartRateSampleCount", metricsV2.heartRate?.sampleCount);
+      setSource("spo2AvgPercent", metricsV2.spo2?.avgPercent);
+      setSource("spo2MinPercent", metricsV2.spo2?.minPercent);
+      setSource("spo2MaxPercent", metricsV2.spo2?.maxPercent);
+      setSource("spo2SampleCount", metricsV2.spo2?.sampleCount);
+
+      const mergedMetricSources = { ...existingMetricSources, ...metricSources };
+
       await prisma.dailySummary.upsert({
-        where: { userId_date: { userId, date: day } },
+        where: { userId_date: { userId, date: dayStartUtc } },
         update: {
+          timezone: userTimezone,
+          providersPresent,
+          providerPrimary: existingSummary?.providerPrimary ?? "GARMIN",
+          metricSources: mergedMetricSources,
           steps,
           activeCaloriesKcal,
           totalCaloriesKcal: metricsV2.totalCaloriesKcal ?? undefined,
@@ -188,8 +300,11 @@ garminRouter.post(
         },
         create: {
           userId,
-          date: day,
-          timezone: 'Europe/Istanbul', // TODO: later per-user setting
+          date: dayStartUtc,
+          timezone: userTimezone,
+          providersPresent,
+          providerPrimary: "GARMIN",
+          metricSources: mergedMetricSources,
           steps,
           activeCaloriesKcal,
           totalCaloriesKcal: metricsV2.totalCaloriesKcal ?? undefined,
@@ -226,6 +341,44 @@ garminRouter.post(
           spo2SampleCount: metricsV2.spo2?.sampleCount ?? undefined,
         },
       });
+
+      const payloadHash = crypto
+        .createHash("sha256")
+        .update(JSON.stringify(body))
+        .digest("hex");
+
+      try {
+        await prisma.providerIngestion.create({
+          data: {
+            provider: "GARMIN",
+            userId,
+            providerAccountId: providerAccount.id,
+            payloadHash,
+            payloadJson: body as object,
+            sourceTimestamp: new Date(timestamp * 1000),
+            dayStartUtc,
+            schemaVersion: (body as GarminDailyPayloadV2).schemaVersion ?? undefined,
+            status: "OK",
+          },
+        });
+      } catch (error: any) {
+        if (error?.code !== "P2002") {
+          await prisma.providerIngestion.create({
+            data: {
+              provider: "GARMIN",
+              userId,
+              providerAccountId: providerAccount.id,
+              payloadHash,
+              payloadJson: body as object,
+              sourceTimestamp: new Date(timestamp * 1000),
+              dayStartUtc,
+              schemaVersion: (body as GarminDailyPayloadV2).schemaVersion ?? undefined,
+              status: "FAILED",
+              errorMessage: error?.message ?? "unknown_error",
+            },
+          });
+        }
+      }
 
       return res.status(200).json({ ok: true });
     } catch (err) {

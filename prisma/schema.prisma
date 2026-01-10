@@ -25,6 +25,20 @@ enum AbuseCategory {
   OTHER
 }
 
+enum ActivityProvider {
+  GARMIN
+  STRAVA
+  APPLE_HEALTH
+  OTHER
+}
+
+enum ProviderAccountStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+  ERROR
+}
+
 model User {
   id               String        @id @default(uuid())
   telegramUserId   BigInt        @unique
@@ -32,12 +46,15 @@ model User {
   createdAt        DateTime      @default(now())
 
   status           UserStatus  @default(INACTIVE)
+  timezone         String      @default("Europe/Istanbul")
 
   dailySummaries   DailySummary[]
   garminDevices    GarminDevice[]
   foodEntries      FoodEntry[]
   abuseEvents      AbuseEvent[]
   pairingTokens    PairingToken[]
+  providerAccounts ProviderAccount[]
+  providerIngestions ProviderIngestion[]
 }
 
 model FoodEntry {
@@ -49,6 +66,10 @@ model FoodEntry {
   imagePathOrUrl String
   captionText    String?
   aiParsedJson   Json?
+  energyKcal     Int?
+  proteinG       Float?
+  carbsG         Float?
+  fatG           Float?
 
   @@index([userId, timestamp])
 }
@@ -75,6 +96,24 @@ model DailySummary {
   timezone              String?
   schemaVersion         String?
   dayStartTimestamp     DateTime?
+
+  // provider metadata
+  providersPresent      Json?
+  providerPrimary       ActivityProvider?
+  metricSources         Json?
+  providerMetaJson      Json?
+
+  // nutrition rollups
+  mealsCount            Int?
+  nutritionKcal         Int?
+  nutritionProteinG     Float?
+  nutritionCarbsG       Float?
+  nutritionFatG         Float?
+  firstMealAt           DateTime?
+  lastMealAt            DateTime?
+  missingMacrosCount    Int?
+  netKcalEstimate       Int?
+  notes                 String?
 
   // movement
   steps                 Int?
@@ -115,10 +154,85 @@ model DailySummary {
   spo2MaxPercent        Float?
   spo2SampleCount       Int?
 
+  aiReport              DailyAiReport?
+
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 
   @@unique([userId, date])
+}
+
+model DailyAiReport {
+  id             String       @id @default(uuid())
+  dailySummary   DailySummary @relation(fields: [dailySummaryId], references: [id], onDelete: Cascade)
+  dailySummaryId String       @unique
+
+  model          String
+  promptVersion  String
+  inputJson      Json
+  outputJson     Json
+  messageText    String?
+  sentAt         DateTime?
+
+  createdAt      DateTime @default(now())
+}
+
+model ProviderAccount {
+  id             String           @id @default(uuid())
+  user           User             @relation(fields: [userId], references: [id])
+  userId         String
+  provider       ActivityProvider
+  externalUserId String?
+  accessToken    String?
+  refreshToken   String?
+  tokenExpiresAt DateTime?
+  scopes         String[]
+  status         ProviderAccountStatus @default(ACTIVE)
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  devices        ProviderDevice[]
+  ingestions     ProviderIngestion[]
+
+  @@unique([userId, provider])
+  @@index([provider, externalUserId])
+}
+
+model ProviderDevice {
+  id                String          @id @default(uuid())
+  providerAccount   ProviderAccount @relation(fields: [providerAccountId], references: [id], onDelete: Cascade)
+  providerAccountId String
+  externalDeviceId  String?
+  deviceApiKey      String?         @unique
+  model             String?
+  firmwareVersion   String?
+  deviceName        String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@unique([providerAccountId, externalDeviceId])
+  @@index([providerAccountId, externalDeviceId])
+}
+
+model ProviderIngestion {
+  id                String           @id @default(uuid())
+  provider          ActivityProvider
+  user              User             @relation(fields: [userId], references: [id])
+  userId            String
+  providerAccount   ProviderAccount? @relation(fields: [providerAccountId], references: [id], onDelete: SetNull)
+  providerAccountId String?
+  payloadHash       String
+  payloadJson       Json
+  receivedAt        DateTime         @default(now())
+  sourceTimestamp   DateTime?
+  dayStartUtc       DateTime
+  schemaVersion     String?
+  status            String?
+  errorMessage      String?
+
+  @@index([userId, dayStartUtc])
+  @@index([provider, payloadHash])
+  @@unique([provider, userId, dayStartUtc, payloadHash])
 }
 
 model AbuseEvent {

@@ -1,4 +1,6 @@
+import { DateTime } from "luxon";
 import { prisma } from "../db/client";
+import { DEFAULT_TIMEZONE } from "../utils/timezone";
 
 export interface FoodItem {
     name: string;
@@ -42,8 +44,14 @@ export async function getUserStatsForLastNDays(
     }
 
     // 2. Time window
-    const since = new Date();
-    since.setDate(since.getDate() - days);
+    const timezone = user.timezone ?? DEFAULT_TIMEZONE;
+    const safeDays = Math.max(1, days);
+    const since = DateTime.now()
+        .setZone(timezone)
+        .startOf("day")
+        .minus({ days: safeDays - 1 })
+        .toUTC()
+        .toJSDate();
 
     // 3. Load food entries
     const entries = await prisma.foodEntry.findMany({
