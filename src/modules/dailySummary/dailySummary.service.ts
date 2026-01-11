@@ -164,7 +164,7 @@ function roundTo1(value: number): number {
 }
 
 function escapeMarkdown(text: string): string {
-    return text.replace(/([_*`[\]])/g, "\\$1");
+    return text.replace(/([\\_*`[\]])/g, "\\$1");
 }
 
 function normalizeAiText(text: string): string {
@@ -746,7 +746,8 @@ function renderDailyMessage({
 
     if (aiOutput.flags.length > 0) {
         lines.push("");
-        lines.push(`_Flags: ${escapeMarkdown(aiOutput.flags.join(", "))}_`);
+        const flagsText = aiOutput.flags.map((flag) => flag.replace(/_/g, " ")).join(", ");
+        lines.push(`_Flags: ${escapeMarkdown(flagsText)}_`);
     }
 
     lines.push("");

@@ -21,6 +21,19 @@ const PRIVACY_URL = "https://nutrition-miniapp-933t8h3ax-daxdues-projects.vercel
 const BACKEND_URL = process.env.BACKEND_URL || process.env.PUBLIC_URL || 'http://localhost:3000';
 const MINIAPP_URL = process.env.FRONTEND_ORIGIN || "https://nutrition-miniapp-933t8h3ax-daxdues-projects.vercel.app";
 
+function stripMarkdown(text: string): string {
+  return text.replace(/\\([_*`[\]])/g, "$1").replace(/[*_`]/g, "");
+}
+
+async function replyMarkdownWithFallback(ctx: Context, text: string) {
+  try {
+    await ctx.reply(text, { parse_mode: "Markdown" });
+  } catch (error) {
+    console.error("Failed to send Markdown message, falling back to plain text:", error);
+    await ctx.reply(stripMarkdown(text));
+  }
+}
+
 /**
  * Find or create a user record based on Telegram user id.
  */
@@ -304,7 +317,7 @@ bot.command("summary", async (ctx) => {
       return ctx.reply("No summary is available yet for today.");
     }
 
-    await ctx.reply(report.messageText, { parse_mode: "Markdown" });
+    await replyMarkdownWithFallback(ctx, report.messageText);
     await prisma.dailyAiReport.update({
       where: { id: report.id },
       data: { sentAt: new Date() },
