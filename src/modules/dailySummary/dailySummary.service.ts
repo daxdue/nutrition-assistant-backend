@@ -71,6 +71,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function normalizeForHash(value: unknown): unknown {
+    if (Array.isArray(value)) {
+        return value.map((item) => {
+            const normalized = normalizeForHash(item);
+            return normalized === undefined ? null : normalized;
+        });
+    }
+    if (isRecord(value)) {
+        const normalized: Record<string, unknown> = {};
+        for (const key of Object.keys(value).sort()) {
+            const entry = normalizeForHash(value[key]);
+            if (entry !== undefined) {
+                normalized[key] = entry;
+            }
+        }
+        return normalized;
+    }
+    return value;
+}
+
+export function buildDailyInputHash(value: unknown): string {
+    return JSON.stringify(normalizeForHash(value));
+}
+
 function extractTotalsFromJson(raw: unknown): NutritionTotals | null {
     if (!raw || typeof raw !== "object") {
         return null;
@@ -844,9 +868,6 @@ export async function ensureDailyAiReportForUserDay({
     const existing = await prisma.dailyAiReport.findUnique({
         where: { dailySummaryId: dailySummary.id },
     });
-    if (existing && !force) {
-        return existing;
-    }
 
     const { activities, activitySummary } = extractGarminActivityMeta(dailySummary.providerMetaJson);
     const summaryData = {
@@ -887,6 +908,17 @@ export async function ensureDailyAiReportForUserDay({
         rollup,
         summary: summaryData,
     });
+
+    if (existing && !force) {
+        const existingHash = buildDailyInputHash(existing.inputJson);
+        if (
+            existing.messageText &&
+            existing.promptVersion === DAILY_REPORT_PROMPT_VERSION &&
+            existingHash === buildDailyInputHash(inputJson)
+        ) {
+            return existing;
+        }
+    }
 
     const aiOutput = await generateDailyAiReport(inputJson);
     const inputFlags = Array.isArray((inputJson as any).flags) ? (inputJson as any).flags : [];

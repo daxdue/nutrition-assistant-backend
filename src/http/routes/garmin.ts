@@ -5,6 +5,8 @@ import { Prisma } from "@prisma/client";
 import { prisma } from '../../db/client';
 import { DateTime } from "luxon";
 import { DEFAULT_TIMEZONE, getStartOfDayUtcFromEpochSeconds } from "../../utils/timezone";
+import { ensureDailyAiReportForUserDay, buildDailyInputHash } from "../../modules/dailySummary/dailySummary.service";
+import { bot } from "../../telegram/bot";
 import { apiKeyAuth, verifyDeviceId, AuthenticatedRequest } from '../middleware/apiKeyAuth';
 import { garminDeviceRateLimit } from '../middleware/rateLimit';
 import { GarminActivity, GarminActivitySummary, GarminActivitySummaryByType } from "../../interfaces/GarminActivity";
@@ -207,7 +209,7 @@ garminRouter.post(
       // Convert epoch seconds → Date and normalize to midnight UTC for "day"
       const user = await prisma.user.findUnique({
         where: { id: userId },
-        select: { timezone: true },
+        select: { timezone: true, telegramUserId: true, status: true },
       });
       const userTimezone = user?.timezone ?? DEFAULT_TIMEZONE;
 
@@ -350,7 +352,7 @@ garminRouter.post(
         : undefined;
       const providerMetaJsonInput = providerMetaJson as Prisma.InputJsonValue | undefined;
 
-      await prisma.dailySummary.upsert({
+      const dailySummary = await prisma.dailySummary.upsert({
         where: { userId_date: { userId, date: dayStartUtc } },
         update: {
           timezone: userTimezone,
@@ -474,6 +476,53 @@ garminRouter.post(
             },
           });
         }
+      }
+
+      const telegramUserId = user?.telegramUserId;
+      if (user?.status === "ACTIVE" && telegramUserId) {
+        void (async () => {
+          try {
+            const existingReport = await prisma.dailyAiReport.findUnique({
+              where: { dailySummaryId: dailySummary.id },
+              select: { inputJson: true, messageText: true, sentAt: true },
+            });
+            const report = await ensureDailyAiReportForUserDay({
+              userId,
+              timezone: userTimezone,
+              dayStartUtc,
+            });
+            if (!report.messageText) {
+              return;
+            }
+
+            const currentHash = buildDailyInputHash(report.inputJson);
+            const existingHash = existingReport ? buildDailyInputHash(existingReport.inputJson) : null;
+            const shouldSend =
+              !existingReport ||
+              !existingReport.messageText ||
+              !existingReport.sentAt ||
+              existingHash !== currentHash;
+
+            if (!shouldSend) {
+              return;
+            }
+
+            const chatId = telegramUserId.toString();
+            try {
+              await bot.telegram.sendMessage(chatId, report.messageText, { parse_mode: "Markdown" });
+            } catch (error) {
+              console.error("Failed to send Markdown daily summary, falling back to plain text:", error);
+              await bot.telegram.sendMessage(chatId, report.messageText);
+            }
+
+            await prisma.dailyAiReport.update({
+              where: { id: report.id },
+              data: { sentAt: new Date() },
+            });
+          } catch (error) {
+            console.error("Failed to send daily summary after Garmin ingestion:", error);
+          }
+        })();
       }
 
       return res.status(200).json({ ok: true });
