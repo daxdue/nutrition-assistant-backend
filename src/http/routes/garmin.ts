@@ -1,6 +1,7 @@
 // src/http/routes/garmin.ts
 import { Router, Response, NextFunction } from 'express';
 import crypto from "crypto";
+import { Prisma } from "@prisma/client";
 import { prisma } from '../../db/client';
 import { DateTime } from "luxon";
 import { DEFAULT_TIMEZONE, getStartOfDayUtcFromEpochSeconds } from "../../utils/timezone";
@@ -347,6 +348,7 @@ garminRouter.post(
           };
         })()
         : undefined;
+      const providerMetaJsonInput = providerMetaJson as Prisma.InputJsonValue | undefined;
 
       await prisma.dailySummary.upsert({
         where: { userId_date: { userId, date: dayStartUtc } },
@@ -355,7 +357,7 @@ garminRouter.post(
           providersPresent,
           providerPrimary: existingSummary?.providerPrimary ?? "GARMIN",
           metricSources: mergedMetricSources,
-          providerMetaJson: providerMetaJson ?? undefined,
+          providerMetaJson: providerMetaJsonInput,
           steps,
           activeCaloriesKcal,
           totalCaloriesKcal: metricsV2.totalCaloriesKcal ?? undefined,
@@ -398,7 +400,7 @@ garminRouter.post(
           providersPresent,
           providerPrimary: "GARMIN",
           metricSources: mergedMetricSources,
-          providerMetaJson: providerMetaJson ?? undefined,
+          providerMetaJson: providerMetaJsonInput,
           steps,
           activeCaloriesKcal,
           totalCaloriesKcal: metricsV2.totalCaloriesKcal ?? undefined,
