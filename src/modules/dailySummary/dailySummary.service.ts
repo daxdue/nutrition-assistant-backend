@@ -627,6 +627,27 @@ function formatActivitySummary(summary: GarminSummaryInput): string | null {
     return null;
 }
 
+function getActivityDistanceCm(summary: GarminSummaryInput): number | null {
+    if (isNumber(summary.activitySummary?.totalDistanceCm)) {
+        return summary.activitySummary.totalDistanceCm;
+    }
+    if (!Array.isArray(summary.activities) || summary.activities.length === 0) {
+        return null;
+    }
+    let total = 0;
+    let hasAny = false;
+    for (const activity of summary.activities) {
+        if (!activity || typeof activity !== "object") {
+            continue;
+        }
+        if (isNumber(activity.distanceCm)) {
+            total += activity.distanceCm;
+            hasAny = true;
+        }
+    }
+    return hasAny ? total : null;
+}
+
 function buildActivityLines(summary: GarminSummaryInput): string[] {
     const lines: string[] = [];
 
@@ -665,8 +686,21 @@ function buildActivityLines(summary: GarminSummaryInput): string[] {
         lines.push(`Resting kcal: ${Math.round(summary.restingCaloriesKcal)}`);
     }
 
-    if (isNumber(summary.distanceCm) && summary.distanceCm > 0) {
-        lines.push(`Distance: ${formatDistance(summary.distanceCm)}`);
+    const stepsDistance = isNumber(summary.distanceCm) && summary.distanceCm > 0 ? summary.distanceCm : null;
+    const activityDistance = getActivityDistanceCm(summary);
+    let totalDistance: number | null = null;
+    if (stepsDistance !== null && activityDistance !== null) {
+        let stepsBased = false;
+        if (isNumber(summary.steps) && summary.steps > 0) {
+            const strideCm = stepsDistance / summary.steps;
+            stepsBased = strideCm >= 30 && strideCm <= 150;
+        }
+        totalDistance = stepsBased ? stepsDistance + activityDistance : Math.max(stepsDistance, activityDistance);
+    } else {
+        totalDistance = stepsDistance ?? activityDistance;
+    }
+    if (totalDistance !== null) {
+        lines.push(`Total distance: ${formatDistance(totalDistance)}`);
     }
 
     if (isNumber(summary.floorsClimbed) || isNumber(summary.floorsDescended)) {

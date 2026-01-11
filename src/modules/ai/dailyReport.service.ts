@@ -3,7 +3,7 @@ import { DailyAiReportOutput } from "../dailySummary/dailyReport.types";
 
 const model = "gpt-4.1-mini";
 const openai = new OpenAI();
-export const DAILY_REPORT_PROMPT_VERSION = "dailyReportV2";
+export const DAILY_REPORT_PROMPT_VERSION = "dailyReportV3";
 
 const DAILY_REPORT_SYSTEM_PROMPT = `You generate concise daily nutrition summaries for a Telegram bot.
 
@@ -12,7 +12,7 @@ Requirements:
 - Output JSON only. No markdown or extra text.
 - If input flags include MISSING_GARMIN, explicitly note the summary is based on meals only.
 - If input flags include MISSING_MEALS, explicitly note the summary is based on watch data only.
-- If input includes Garmin activity data (garmin.activities or garmin.activitySummary) AND nutrition macros are present, include at least one bullet that explicitly links macros (protein/carbs/fat) with the activity types performed (e.g. strength/gym vs endurance like running/cycling). Use cautious, non-medical language.
+- If input includes Garmin activity data (garmin.activities or garmin.activitySummary), include at least one bullet that connects the day's nutrition intake with the activity types performed. Prefer macros (protein/carbs/fat), but if macros are missing use total calories or meal count. Do not invent macro values; if nutrition data is missing, say you cannot assess the nutrition-activity relationship.
 - Mention activity types by name when available. Do not invent activities or macro values when missing.
 - Avoid medical claims or diagnoses.
 - Keep summary concise and friendly.
