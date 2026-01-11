@@ -11,6 +11,7 @@ interface NutritionTotals {
     proteinG?: number;
     carbsG?: number;
     fatG?: number;
+    fiberG?: number;
 }
 
 interface RollupResult {
@@ -19,6 +20,7 @@ interface RollupResult {
     nutritionProteinG: number | null;
     nutritionCarbsG: number | null;
     nutritionFatG: number | null;
+    nutritionFiberG: number | null;
     firstMealAt: Date | null;
     lastMealAt: Date | null;
     missingMacrosCount: number | null;
@@ -108,16 +110,21 @@ function extractTotalsFromJson(raw: unknown): NutritionTotals | null {
         const proteinG = isNumber(totals.protein_g) ? totals.protein_g : undefined;
         const carbsG = isNumber(totals.carbs_g) ? totals.carbs_g : undefined;
         const fatG = isNumber(totals.fat_g) ? totals.fat_g : undefined;
-        if (energyKcal || proteinG || carbsG || fatG) {
-            return { energyKcal, proteinG, carbsG, fatG };
+        const fiberG = isNumber(totals.fiber_g) ? totals.fiber_g : undefined;
+        if (energyKcal || proteinG || carbsG || fatG || fiberG) {
+            return { energyKcal, proteinG, carbsG, fatG, fiberG };
         }
     }
 
     const items = Array.isArray(asAny.items) ? asAny.items : null;
     if (!items) {
         const totalEstimated = asAny.total_estimated_kcal;
-        if (isNumber(totalEstimated)) {
-            return { energyKcal: totalEstimated };
+        const totalEstimatedFiber = asAny.total_estimated_fiber_g;
+        if (isNumber(totalEstimated) || isNumber(totalEstimatedFiber)) {
+            return {
+                energyKcal: isNumber(totalEstimated) ? totalEstimated : undefined,
+                fiberG: isNumber(totalEstimatedFiber) ? totalEstimatedFiber : undefined,
+            };
         }
         return null;
     }
@@ -126,6 +133,7 @@ function extractTotalsFromJson(raw: unknown): NutritionTotals | null {
     let proteinG = 0;
     let carbsG = 0;
     let fatG = 0;
+    let fiberG = 0;
     let hasAny = false;
 
     for (const item of items) {
@@ -136,6 +144,7 @@ function extractTotalsFromJson(raw: unknown): NutritionTotals | null {
         const protein = (item as any).protein_g;
         const carbs = (item as any).carbs_g;
         const fat = (item as any).fat_g;
+        const fiber = (item as any).fiber_g;
 
         if (isNumber(energy)) {
             energyKcal += energy;
@@ -153,6 +162,10 @@ function extractTotalsFromJson(raw: unknown): NutritionTotals | null {
             fatG += fat;
             hasAny = true;
         }
+        if (isNumber(fiber)) {
+            fiberG += fiber;
+            hasAny = true;
+        }
     }
 
     if (!hasAny) {
@@ -164,6 +177,7 @@ function extractTotalsFromJson(raw: unknown): NutritionTotals | null {
         proteinG: proteinG > 0 ? proteinG : undefined,
         carbsG: carbsG > 0 ? carbsG : undefined,
         fatG: fatG > 0 ? fatG : undefined,
+        fiberG: fiberG > 0 ? fiberG : undefined,
     };
 }
 
@@ -175,12 +189,13 @@ function normalizeTotals(totals: NutritionTotals | null): NutritionTotals | null
     const proteinG = isNumber(totals.proteinG) ? totals.proteinG : undefined;
     const carbsG = isNumber(totals.carbsG) ? totals.carbsG : undefined;
     const fatG = isNumber(totals.fatG) ? totals.fatG : undefined;
+    const fiberG = isNumber(totals.fiberG) ? totals.fiberG : undefined;
 
-    if (!energyKcal && !proteinG && !carbsG && !fatG) {
+    if (!energyKcal && !proteinG && !carbsG && !fatG && !fiberG) {
         return null;
     }
 
-    return { energyKcal, proteinG, carbsG, fatG };
+    return { energyKcal, proteinG, carbsG, fatG, fiberG };
 }
 
 function roundTo1(value: number): number {
@@ -277,6 +292,7 @@ function computeRollup(entries: Array<{
     proteinG: number | null;
     carbsG: number | null;
     fatG: number | null;
+    fiberG: number | null;
     aiParsedJson: unknown;
 }>): RollupResult {
     const mealsCount = entries.length;
@@ -286,6 +302,7 @@ function computeRollup(entries: Array<{
     let totalProtein = 0;
     let totalCarbs = 0;
     let totalFat = 0;
+    let totalFiber = 0;
     let hasAnyTotals = false;
     let missingMacrosCount = 0;
 
@@ -295,6 +312,7 @@ function computeRollup(entries: Array<{
             proteinG: entry.proteinG ?? undefined,
             carbsG: entry.carbsG ?? undefined,
             fatG: entry.fatG ?? undefined,
+            fiberG: entry.fiberG ?? undefined,
         });
         const parsed = normalized ?? extractTotalsFromJson(entry.aiParsedJson);
         const totals = parsed ? normalizeTotals(parsed) : null;
@@ -327,6 +345,10 @@ function computeRollup(entries: Array<{
                 totalFat += totals.fatG;
                 hasAnyTotals = true;
             }
+            if (isNumber(totals.fiberG)) {
+                totalFiber += totals.fiberG;
+                hasAnyTotals = true;
+            }
         }
 
         mealList.push({
@@ -354,6 +376,7 @@ function computeRollup(entries: Array<{
         nutritionProteinG: hasAnyTotals ? roundTo1(totalProtein) : null,
         nutritionCarbsG: hasAnyTotals ? roundTo1(totalCarbs) : null,
         nutritionFatG: hasAnyTotals ? roundTo1(totalFat) : null,
+        nutritionFiberG: hasAnyTotals ? roundTo1(totalFiber) : null,
         firstMealAt,
         lastMealAt,
         missingMacrosCount: mealsCount > 0 ? missingMacrosCount : null,
@@ -454,6 +477,7 @@ function buildDailyInput({
             nutritionProteinG: rollup.nutritionProteinG,
             nutritionCarbsG: rollup.nutritionCarbsG,
             nutritionFatG: rollup.nutritionFatG,
+            nutritionFiberG: rollup.nutritionFiberG,
             firstMealAt: rollup.firstMealAt?.toISOString() ?? null,
             lastMealAt: rollup.lastMealAt?.toISOString() ?? null,
             missingMacrosCount: rollup.missingMacrosCount,
@@ -524,6 +548,10 @@ function buildNutritionLines(rollup: RollupResult, summary: GarminSummaryInput, 
     if (isNumber(rollup.nutritionFatG)) macroParts.push(`${formatGrams(rollup.nutritionFatG)} F`);
     if (macroParts.length > 0) {
         lines.push(`Macros: ${macroParts.join(" / ")}`);
+    }
+
+    if (isNumber(rollup.nutritionFiberG)) {
+        lines.push(`Fiber: ${formatGrams(rollup.nutritionFiberG)}`);
     }
 
     const split = formatMacroSplit(rollup.nutritionProteinG, rollup.nutritionCarbsG, rollup.nutritionFatG);
@@ -801,6 +829,7 @@ export async function computeAndUpsertDailyRollup(userId: string, timezone: stri
             proteinG: entry.proteinG,
             carbsG: entry.carbsG,
             fatG: entry.fatG,
+            fiberG: entry.fiberG,
             aiParsedJson: entry.aiParsedJson,
         }))
     );
@@ -814,6 +843,7 @@ export async function computeAndUpsertDailyRollup(userId: string, timezone: stri
             nutritionProteinG: rollup.nutritionProteinG,
             nutritionCarbsG: rollup.nutritionCarbsG,
             nutritionFatG: rollup.nutritionFatG,
+            nutritionFiberG: rollup.nutritionFiberG,
             firstMealAt: rollup.firstMealAt,
             lastMealAt: rollup.lastMealAt,
             missingMacrosCount: rollup.missingMacrosCount,
@@ -828,6 +858,7 @@ export async function computeAndUpsertDailyRollup(userId: string, timezone: stri
             nutritionProteinG: rollup.nutritionProteinG,
             nutritionCarbsG: rollup.nutritionCarbsG,
             nutritionFatG: rollup.nutritionFatG,
+            nutritionFiberG: rollup.nutritionFiberG,
             firstMealAt: rollup.firstMealAt,
             lastMealAt: rollup.lastMealAt,
             missingMacrosCount: rollup.missingMacrosCount,

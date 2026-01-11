@@ -40,10 +40,12 @@ You MUST return a single JSON object that matches this schema exactly:
       "energy_kcal": number,
       "protein_g": number,
       "carbs_g": number,
-      "fat_g": number
+      "fat_g": number,
+      "fiber_g": number
     }
   ],
-  "total_estimated_kcal": number
+  "total_estimated_kcal": number,
+  "total_estimated_fiber_g": number
 }
 
 IMPORTANT LOGIC:
@@ -63,6 +65,7 @@ IMPORTANT LOGIC:
     - Set "meal_type": "unknown"
     - Set "items": []
     - Set "total_estimated_kcal": 0
+    - Set "total_estimated_fiber_g": 0
 
 - If the image + caption ARE safe AND clearly show/describe a meal or drink:
   - Set "allowed": true and "category": "OK".
@@ -80,7 +83,9 @@ Nutrition rules (only when allowed = true):
   - Numbers must be non-negative.
   - Ensure energy_kcal roughly matches macros (4 kcal/g for protein & carbs, 9 kcal/g for fat), but you do not need to be perfectly precise.
   - It is OK to be approximate, but stay within a plausible range.
+- Provide fiber_g for each item (grams of dietary fiber) based on typical values.
 - total_estimated_kcal must equal the sum of all items’ energy_kcal (allow for small rounding discrepancies).
+- total_estimated_fiber_g must equal the sum of all items’ fiber_g (allow for small rounding discrepancies).
 - If something in the image clearly looks non-caloric (e.g., water, black coffee without sugar), you may omit it OR include it with ~0 kcal.
 
 Formatting requirements:
@@ -89,7 +94,7 @@ Formatting requirements:
 - Follow exactly the field names:
   "allowed", "reason", "category",
   "meal_type", "items", "name", "portion_grams", "energy_kcal",
-  "protein_g", "carbs_g", "fat_g", "total_estimated_kcal".
+  "protein_g", "carbs_g", "fat_g", "fiber_g", "total_estimated_kcal", "total_estimated_fiber_g".
 - Do not include any extra fields.
 - Do not include the outer database fields like id, user_id, timestamp, image_path_or_url, or caption_text.
 - The response must be valid JSON that can be parsed directly.
@@ -106,6 +111,7 @@ const RESPONSE_FORMAT = {
     "meal_type",
     "items",
     "total_estimated_kcal",
+    "total_estimated_fiber_g",
   ],
   properties: {
     allowed: { type: "boolean" },
@@ -147,6 +153,7 @@ const RESPONSE_FORMAT = {
           "protein_g",
           "carbs_g",
           "fat_g",
+          "fiber_g",
         ],
         properties: {
           name: { type: "string" },
@@ -155,11 +162,13 @@ const RESPONSE_FORMAT = {
           protein_g: { type: "number" },
           carbs_g: { type: "number" },
           fat_g: { type: "number" },
+          fiber_g: { type: "number" },
         },
         additionalProperties: false,
       },
     },
     total_estimated_kcal: { type: "number" },
+    total_estimated_fiber_g: { type: "number" },
   },
 };
 

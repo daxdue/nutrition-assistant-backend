@@ -14,7 +14,7 @@ interface ProcessMealPhotoArgs {
     caption: string;
 };
 
-function sumMacro(items: NutritionItem[], key: "protein_g" | "carbs_g" | "fat_g"): number | null {
+function sumMacro(items: NutritionItem[], key: "protein_g" | "carbs_g" | "fat_g" | "fiber_g"): number | null {
     let total = 0;
     let hasAny = false;
     for (const item of items) {
@@ -75,6 +75,9 @@ export async function processMealPhotoTask({
         const proteinG = sumMacro(items, "protein_g");
         const carbsG = sumMacro(items, "carbs_g");
         const fatG = sumMacro(items, "fat_g");
+        const fiberG = sumMacro(items, "fiber_g");
+        const fiberTotalG =
+            fiberG ?? (typeof analysis.total_estimated_fiber_g === "number" ? analysis.total_estimated_fiber_g : null);
 
         await prisma.foodEntry.create({
             data: {
@@ -87,6 +90,7 @@ export async function processMealPhotoTask({
                 proteinG,
                 carbsG,
                 fatG,
+                fiberG: fiberTotalG,
             },
         });
 
