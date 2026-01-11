@@ -304,7 +304,7 @@ bot.command("summary", async (ctx) => {
       return ctx.reply("No summary is available yet for today.");
     }
 
-    await ctx.reply(report.messageText);
+    await ctx.reply(report.messageText, { parse_mode: "Markdown" });
     await prisma.dailyAiReport.update({
       where: { id: report.id },
       data: { sentAt: new Date() },

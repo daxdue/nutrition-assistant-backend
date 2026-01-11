@@ -6,8 +6,79 @@ import { DateTime } from "luxon";
 import { DEFAULT_TIMEZONE, getStartOfDayUtcFromEpochSeconds } from "../../utils/timezone";
 import { apiKeyAuth, verifyDeviceId, AuthenticatedRequest } from '../middleware/apiKeyAuth';
 import { garminDeviceRateLimit } from '../middleware/rateLimit';
+import { GarminActivity, GarminActivitySummary, GarminActivitySummaryByType } from "../../interfaces/GarminActivity";
 
 export const garminRouter = Router();
+
+const isFiniteNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
+
+const asRecord = (value: unknown): Record<string, unknown> =>
+  value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+
+const buildActivitySummary = (activities?: GarminActivity[]): GarminActivitySummary | undefined => {
+  if (!activities || activities.length === 0) {
+    return undefined;
+  }
+
+  const byType = new Map<string, GarminActivitySummaryByType>();
+  let totalCount = 0;
+  let totalDurationSeconds = 0;
+  let totalDistanceCm = 0;
+  let totalCaloriesKcal = 0;
+
+  for (const activity of activities) {
+    if (!activity || typeof activity !== "object") {
+      continue;
+    }
+
+    const type =
+      typeof activity.type === "string" && activity.type.trim().length > 0
+        ? activity.type.trim()
+        : "UNKNOWN";
+
+    const entry = byType.get(type) ?? { type, count: 0 };
+    entry.count = (entry.count ?? 0) + 1;
+    totalCount += 1;
+
+    if (isFiniteNumber(activity.durationSeconds)) {
+      entry.durationSeconds = (entry.durationSeconds ?? 0) + activity.durationSeconds;
+      totalDurationSeconds += activity.durationSeconds;
+    }
+
+    if (isFiniteNumber(activity.distanceCm)) {
+      entry.distanceCm = (entry.distanceCm ?? 0) + activity.distanceCm;
+      totalDistanceCm += activity.distanceCm;
+    }
+
+    if (isFiniteNumber(activity.caloriesKcal)) {
+      entry.caloriesKcal = (entry.caloriesKcal ?? 0) + activity.caloriesKcal;
+      totalCaloriesKcal += activity.caloriesKcal;
+    }
+
+    byType.set(type, entry);
+  }
+
+  if (totalCount === 0) {
+    return undefined;
+  }
+
+  const summary: GarminActivitySummary = {
+    totalCount,
+    byType: Array.from(byType.values()),
+  };
+
+  if (totalDurationSeconds > 0) {
+    summary.totalDurationSeconds = Math.round(totalDurationSeconds);
+  }
+  if (totalDistanceCm > 0) {
+    summary.totalDistanceCm = Math.round(totalDistanceCm);
+  }
+  if (totalCaloriesKcal > 0) {
+    summary.totalCaloriesKcal = Math.round(totalCaloriesKcal);
+  }
+
+  return summary;
+};
 
 /**
  * Payload expected from your Connect IQ app.
@@ -74,6 +145,8 @@ export interface GarminDailyPayloadV2 {
       minBpm?: number;
     };
     steps?: number;
+    activities?: GarminActivity[];
+    activitySummary?: GarminActivitySummary;
   };
 }
 
@@ -99,6 +172,10 @@ garminRouter.post(
       const metrics = (body as GarminDailyPayloadV2).metrics ?? body;
       const metricsV1 = metrics as GarminDailyPayloadV1;
       const metricsV2 = metrics as GarminDailyPayloadV2['metrics'];
+      const hasActivitiesArray = Array.isArray(metricsV2.activities);
+      const activities = hasActivitiesArray ? metricsV2.activities : undefined;
+      const activitySummary = metricsV2.activitySummary ?? buildActivitySummary(activities);
+      const hasActivityData = hasActivitiesArray || Boolean(activitySummary);
 
       const steps = typeof metrics.steps === 'number' ? metrics.steps : undefined;
       const activeCaloriesKcal =
@@ -202,6 +279,7 @@ garminRouter.post(
           providersPresent: true,
           metricSources: true,
           providerPrimary: true,
+          providerMetaJson: true,
         },
       });
 
@@ -255,6 +333,20 @@ garminRouter.post(
       setSource("spo2SampleCount", metricsV2.spo2?.sampleCount);
 
       const mergedMetricSources = { ...existingMetricSources, ...metricSources };
+      const providerMetaJson = hasActivityData
+        ? (() => {
+          const existingMeta = asRecord(existingSummary?.providerMetaJson);
+          const existingGarmin = asRecord(existingMeta.garmin);
+          return {
+            ...existingMeta,
+            garmin: {
+              ...existingGarmin,
+              ...(hasActivitiesArray ? { activities } : {}),
+              ...(activitySummary ? { activitySummary } : {}),
+            },
+          };
+        })()
+        : undefined;
 
       await prisma.dailySummary.upsert({
         where: { userId_date: { userId, date: dayStartUtc } },
@@ -263,6 +355,7 @@ garminRouter.post(
           providersPresent,
           providerPrimary: existingSummary?.providerPrimary ?? "GARMIN",
           metricSources: mergedMetricSources,
+          providerMetaJson: providerMetaJson ?? undefined,
           steps,
           activeCaloriesKcal,
           totalCaloriesKcal: metricsV2.totalCaloriesKcal ?? undefined,
@@ -305,6 +398,7 @@ garminRouter.post(
           providersPresent,
           providerPrimary: "GARMIN",
           metricSources: mergedMetricSources,
+          providerMetaJson: providerMetaJson ?? undefined,
           steps,
           activeCaloriesKcal,
           totalCaloriesKcal: metricsV2.totalCaloriesKcal ?? undefined,
