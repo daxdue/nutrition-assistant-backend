@@ -71,6 +71,7 @@ model FoodEntry {
   carbsG         Float?
   fatG           Float?
   fiberG         Float?
+  correctionCount Int @default(0)
 
   @@index([userId, timestamp])
 }

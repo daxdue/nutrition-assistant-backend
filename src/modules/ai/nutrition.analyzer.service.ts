@@ -101,7 +101,7 @@ Formatting requirements:
 `;
 
 
-const RESPONSE_FORMAT = {
+export const NUTRITION_RESPONSE_FORMAT = {
   type: "object",
   additionalProperties: false,
   required: [
@@ -173,5 +173,5 @@ const RESPONSE_FORMAT = {
 };
 
 export const analyzeNutritionFromImage = async (imageBuffer: Buffer, captionText?: string) => {
-  return processImage(imageBuffer, NUTRITION_SYSTEM_PROMPT, RESPONSE_FORMAT, captionText);
+  return processImage(imageBuffer, NUTRITION_SYSTEM_PROMPT, NUTRITION_RESPONSE_FORMAT, captionText);
 };
