@@ -503,17 +503,20 @@ garminRouter.post(
                 select: { id: true },
               });
               if (!existing) {
+                const providerMeta: Record<string, unknown> = {
+                  kind: "event",
+                  sourceTimestamp: eventTimestamp,
+                };
+                if (deviceExternalId) {
+                  providerMeta.deviceId = deviceExternalId;
+                }
                 await createHydrationEntry({
                   userId,
                   volumeMl,
                   timestamp: eventDate,
                   source: HydrationSource.PROVIDER,
                   provider: "GARMIN",
-                  providerMeta: {
-                    kind: "event",
-                    deviceId: deviceExternalId ?? undefined,
-                    sourceTimestamp: eventTimestamp,
-                  },
+                  providerMeta,
                 });
               }
             }
@@ -528,16 +531,19 @@ garminRouter.post(
               },
               select: { id: true },
             });
+            const providerMeta: Record<string, unknown> = {
+              kind: "daily_total",
+              sourceTimestamp: timestamp,
+            };
+            if (deviceExternalId) {
+              providerMeta.deviceId = deviceExternalId;
+            }
             if (existing) {
               await prisma.hydrationEntry.update({
                 where: { id: existing.id },
                 data: {
                   volumeMl,
-                  providerMeta: {
-                    kind: "daily_total",
-                    deviceId: deviceExternalId ?? undefined,
-                    sourceTimestamp: timestamp,
-                  },
+                  providerMeta,
                 },
               });
             } else {
@@ -547,11 +553,7 @@ garminRouter.post(
                 timestamp: dayStartUtc,
                 source: HydrationSource.PROVIDER,
                 provider: "GARMIN",
-                providerMeta: {
-                  kind: "daily_total",
-                  deviceId: deviceExternalId ?? undefined,
-                  sourceTimestamp: timestamp,
-                },
+                providerMeta,
               });
             }
           }

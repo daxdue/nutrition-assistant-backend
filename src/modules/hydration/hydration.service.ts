@@ -1,4 +1,5 @@
 import { ActivityProvider, HydrationSource, HydrationStatus, HydrationTargetMode } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "../../db/client";
 import { getUtcDayRange } from "../../utils/timezone";
 
@@ -197,7 +198,7 @@ export async function createHydrationEntry(params: {
     timestamp?: Date;
     source: HydrationSource;
     provider?: ActivityProvider | null;
-    providerMeta?: Record<string, unknown> | null;
+    providerMeta?: Prisma.InputJsonValue | null;
 }) {
     if (!isNumber(params.volumeMl) || params.volumeMl <= 0) {
         throw new Error("Invalid hydration volume");
@@ -340,7 +341,7 @@ export async function createHydrationEntryIfEnabled(params: {
     timestamp?: Date;
     source: HydrationSource;
     provider?: ActivityProvider | null;
-    providerMeta?: Record<string, unknown> | null;
+    providerMeta?: Prisma.InputJsonValue | null;
 }) {
     const settings = await prisma.hydrationSettings.findUnique({
         where: { userId: params.userId },
