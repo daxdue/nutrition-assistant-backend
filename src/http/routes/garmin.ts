@@ -503,13 +503,16 @@ garminRouter.post(
                 select: { id: true },
               });
               if (!existing) {
-                const providerMeta: Record<string, unknown> = {
-                  kind: "event",
-                  sourceTimestamp: eventTimestamp,
-                };
-                if (deviceExternalId) {
-                  providerMeta.deviceId = deviceExternalId;
-                }
+                const providerMeta: Prisma.InputJsonObject = deviceExternalId
+                  ? {
+                    kind: "event",
+                    sourceTimestamp: eventTimestamp,
+                    deviceId: deviceExternalId,
+                  }
+                  : {
+                    kind: "event",
+                    sourceTimestamp: eventTimestamp,
+                  };
                 await createHydrationEntry({
                   userId,
                   volumeMl,
@@ -531,13 +534,16 @@ garminRouter.post(
               },
               select: { id: true },
             });
-            const providerMeta: Record<string, unknown> = {
-              kind: "daily_total",
-              sourceTimestamp: timestamp,
-            };
-            if (deviceExternalId) {
-              providerMeta.deviceId = deviceExternalId;
-            }
+            const providerMeta: Prisma.InputJsonObject = deviceExternalId
+              ? {
+                kind: "daily_total",
+                sourceTimestamp: timestamp,
+                deviceId: deviceExternalId,
+              }
+              : {
+                kind: "daily_total",
+                sourceTimestamp: timestamp,
+              };
             if (existing) {
               await prisma.hydrationEntry.update({
                 where: { id: existing.id },
