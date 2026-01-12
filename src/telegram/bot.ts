@@ -4,6 +4,7 @@ import { message } from 'telegraf/filters';
 import axios from 'axios';
 import { DateTime } from 'luxon';
 
+import { HydrationSource, HydrationTargetMode } from '@prisma/client';
 import { prisma } from '../db/client';
 import { processMealPhotoTask } from '../modules/tasks/processMealPhotoTask';
 import { generatePairingToken } from '../services/garmin.service';
@@ -18,6 +19,14 @@ import { ensureDailyAiReportForUserDay } from '../modules/dailySummary/dailySumm
 import { MAX_MEAL_CORRECTIONS_PER_ENTRY } from '../config/limits';
 import { formatNutritionSummary } from '../utils/formatNutrition';
 import { DEFAULT_TIMEZONE, getStartOfDayUtcFromDate } from '../utils/timezone';
+import {
+  computeHydrationRollup,
+  createHydrationEntryIfEnabled,
+  formatHydrationTargetHint,
+  getHydrationSettings,
+  parseHydrationVolumeToMl,
+  upsertHydrationSettings,
+} from '../modules/hydration/hydration.service';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -93,6 +102,82 @@ function formatMealEntrySummary(entry: any, timezone: string) {
     .toFormat('HH:mm');
 
   return { time, name: baseName, kcalText };
+}
+
+async function getHydrationRollupForToday(user: { id: string; timezone: string | null; weightKg: number | null }) {
+  const timezone = user.timezone ?? DEFAULT_TIMEZONE;
+  const dayStartUtc = getStartOfDayUtcFromDate(new Date(), timezone);
+  const dailySummary = await prisma.dailySummary.findUnique({
+    where: { userId_date: { userId: user.id, date: dayStartUtc } },
+    select: {
+      activeMinutesTotal: true,
+      activeMinutesModerate: true,
+      activeMinutesVigorous: true,
+      activeCaloriesKcal: true,
+      temperatureAvgC: true,
+      temperatureMaxC: true,
+    },
+  });
+
+  return computeHydrationRollup({
+    userId: user.id,
+    dayStartUtc,
+    timezone,
+    weightKg: user.weightKg ?? null,
+    activeMinutesTotal: dailySummary?.activeMinutesTotal ?? null,
+    activeMinutesModerate: dailySummary?.activeMinutesModerate ?? null,
+    activeMinutesVigorous: dailySummary?.activeMinutesVigorous ?? null,
+    activeCaloriesKcal: dailySummary?.activeCaloriesKcal ?? null,
+    temperatureAvgC: dailySummary?.temperatureAvgC ?? null,
+    temperatureMaxC: dailySummary?.temperatureMaxC ?? null,
+  });
+}
+
+async function buildHydrationStatusMessage(user: { id: string; timezone: string | null; weightKg: number | null }) {
+  const settings = await getHydrationSettings(user.id);
+  if (!settings || !settings.enabled) {
+    return (
+      "Hydration tracking is disabled.\n" +
+      "Enable with /hydration on 2500 or /hydration auto."
+    );
+  }
+
+  const hydration = await getHydrationRollupForToday(user);
+  if (!hydration) {
+    return "Hydration tracking is disabled.";
+  }
+
+  const consumedText = formatHydrationTargetHint(hydration.consumedMl);
+  const targetText = formatHydrationTargetHint(hydration.targetMl);
+  const pct = hydration.targetMl ? Math.round((hydration.consumedMl / hydration.targetMl) * 100) : null;
+  const modeLabel = settings.targetMode === HydrationTargetMode.RECOMMENDED ? "recommended" : "manual";
+
+  let message = targetText
+    ? `Hydration: ${consumedText} / ${targetText}${pct !== null ? ` (${pct}%)` : ""}.`
+    : `Hydration: ${consumedText} logged today.`;
+  message += ` Target (${modeLabel}).`;
+
+  if (
+    hydration.recommendedMl &&
+    hydration.targetMl &&
+    settings.targetMode === HydrationTargetMode.MANUAL &&
+    Math.abs(hydration.recommendedMl - hydration.targetMl) >= 100
+  ) {
+    message += ` Recommended: ${formatHydrationTargetHint(hydration.recommendedMl)}.`;
+  }
+
+  if (hydration.manualMl > 0 && hydration.providerMl > 0 && hydration.consumedMl === hydration.manualMl) {
+    message += " Provider intake ignored because manual logs are primary.";
+  }
+
+  if (settings.remindersEnabled) {
+    message += ` Reminders ${settings.reminderStartHour}:00-${settings.reminderEndHour}:00 every ${settings.reminderIntervalMinutes} min.`;
+  } else {
+    message += " Reminders off.";
+  }
+
+  message += " Log water with /water 250.";
+  return message;
 }
 
 /**
@@ -387,6 +472,187 @@ bot.command("summary", async (ctx) => {
     console.error("Failed to generate summary:", error);
     await ctx.reply("Sorry, I couldn't generate your summary right now.");
   }
+});
+
+bot.command("water", async (ctx) => {
+  const user = await getOrCreateUser(ctx);
+
+  if (!user) {
+    return ctx.reply(
+      "🚫 You are not authorized to use this bot.\n" +
+      "Use /start to submit an access request."
+    );
+  }
+
+  if (user.status !== "ACTIVE") {
+    return ctx.reply(
+      "⏳ Your access request is pending.\n" +
+      "You’ll be able to log water once an admin approves it."
+    );
+  }
+
+  const text = ("text" in (ctx.message ?? {}) ? (ctx.message as any).text : "") as string;
+  const args = text.split(" ").slice(1).join(" ").trim();
+  if (!args) {
+    return ctx.reply("Usage: /water 250 (ml) or /water 0.5l or /water 8oz");
+  }
+
+  const volumeMl = parseHydrationVolumeToMl(args);
+  if (!volumeMl) {
+    return ctx.reply("Could not parse that amount. Try /water 250, /water 0.5l, or /water 8oz.");
+  }
+
+  const entry = await createHydrationEntryIfEnabled({
+    userId: user.id,
+    volumeMl,
+    timestamp: ctx.message && "date" in ctx.message ? new Date((ctx.message as any).date * 1000) : undefined,
+    source: HydrationSource.MANUAL,
+  });
+
+  if (!entry) {
+    return ctx.reply("Hydration tracking is disabled. Enable it with /hydration on 2500 or /hydration auto.");
+  }
+
+  const hydration = await getHydrationRollupForToday(user);
+  if (hydration?.targetMl) {
+    const consumedText = formatHydrationTargetHint(hydration.consumedMl);
+    const targetText = formatHydrationTargetHint(hydration.targetMl);
+    const pct = Math.round((hydration.consumedMl / hydration.targetMl) * 100);
+    return ctx.reply(
+      `Logged ${formatHydrationTargetHint(volumeMl)}. Today: ${consumedText} / ${targetText} (${pct}%).`
+    );
+  }
+
+  return ctx.reply(`Logged ${formatHydrationTargetHint(volumeMl)}.`);
+});
+
+bot.command("hydration", async (ctx) => {
+  const user = await getOrCreateUser(ctx);
+
+  if (!user) {
+    return ctx.reply(
+      "🚫 You are not authorized to use this bot.\n" +
+      "Use /start to submit an access request."
+    );
+  }
+
+  if (user.status !== "ACTIVE") {
+    return ctx.reply(
+      "⏳ Your access request is pending.\n" +
+      "You’ll be able to manage hydration once an admin approves it."
+    );
+  }
+
+  const text = ("text" in (ctx.message ?? {}) ? (ctx.message as any).text : "") as string;
+  const args = text.split(" ").slice(1);
+  const action = args[0]?.toLowerCase();
+
+  if (!action || action === "status") {
+    const statusMessage = await buildHydrationStatusMessage(user);
+    return ctx.reply(statusMessage);
+  }
+
+  if (["off", "disable", "stop"].includes(action)) {
+    await upsertHydrationSettings({ userId: user.id, enabled: false });
+    return ctx.reply("Hydration tracking disabled. Use /hydration on 2500 to enable it again.");
+  }
+
+  if (["auto", "recommended"].includes(action)) {
+    await upsertHydrationSettings({
+      userId: user.id,
+      enabled: true,
+      targetMode: HydrationTargetMode.RECOMMENDED,
+      dailyTargetMl: null,
+    });
+    const statusMessage = await buildHydrationStatusMessage(user);
+    return ctx.reply(statusMessage);
+  }
+
+  if (["on", "enable", "start"].includes(action)) {
+    const rest = args.slice(1).join(" ").trim();
+    if (rest) {
+      const targetMl = parseHydrationVolumeToMl(rest);
+      if (!targetMl) {
+        return ctx.reply("Could not parse target. Try /hydration on 2500 or /hydration auto.");
+      }
+      await upsertHydrationSettings({
+        userId: user.id,
+        enabled: true,
+        targetMode: HydrationTargetMode.MANUAL,
+        dailyTargetMl: targetMl,
+      });
+    } else {
+      await upsertHydrationSettings({
+        userId: user.id,
+        enabled: true,
+        targetMode: HydrationTargetMode.RECOMMENDED,
+        dailyTargetMl: null,
+      });
+    }
+    const statusMessage = await buildHydrationStatusMessage(user);
+    return ctx.reply(statusMessage);
+  }
+
+  if (["target", "goal"].includes(action)) {
+    const targetText = args.slice(1).join(" ").trim();
+    const targetMl = parseHydrationVolumeToMl(targetText);
+    if (!targetMl) {
+      return ctx.reply("Usage: /hydration target 2500 (ml) or /hydration target 2.5l.");
+    }
+    await upsertHydrationSettings({
+      userId: user.id,
+      enabled: true,
+      targetMode: HydrationTargetMode.MANUAL,
+      dailyTargetMl: targetMl,
+    });
+    const statusMessage = await buildHydrationStatusMessage(user);
+    return ctx.reply(statusMessage);
+  }
+
+  return ctx.reply(
+    "Hydration commands:\n" +
+    "/hydration status\n" +
+    "/hydration on 2500\n" +
+    "/hydration auto\n" +
+    "/hydration target 2500\n" +
+    "/hydration off"
+  );
+});
+
+bot.command("weight", async (ctx) => {
+  const user = await getOrCreateUser(ctx);
+
+  if (!user) {
+    return ctx.reply(
+      "🚫 You are not authorized to use this bot.\n" +
+      "Use /start to submit an access request."
+    );
+  }
+
+  if (user.status !== "ACTIVE") {
+    return ctx.reply(
+      "⏳ Your access request is pending.\n" +
+      "You’ll be able to set weight once an admin approves it."
+    );
+  }
+
+  const text = ("text" in (ctx.message ?? {}) ? (ctx.message as any).text : "") as string;
+  const valueText = text.split(" ").slice(1).join(" ").trim();
+  if (!valueText) {
+    return ctx.reply("Usage: /weight 70 (kg)");
+  }
+
+  const weight = Number.parseFloat(valueText.replace(",", "."));
+  if (!Number.isFinite(weight) || weight < 30 || weight > 250) {
+    return ctx.reply("Please provide a valid weight in kg, e.g. /weight 70.");
+  }
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { weightKg: weight },
+  });
+
+  return ctx.reply(`Saved weight: ${weight} kg. This helps hydration recommendations.`);
 });
 
 bot.command("fix", async (ctx) => {
@@ -793,6 +1059,9 @@ export async function launchBot() {
     { command: 'start', description: 'Start the bot' },
     { command: 'pair', description: 'Pair Garmin watch' },
     { command: 'stats', description: 'Open nutrition stats' },
+    { command: 'water', description: 'Log water intake' },
+    { command: 'hydration', description: 'Hydration settings' },
+    { command: 'weight', description: 'Set weight for recommendations' },
     { command: 'fix', description: 'Correct a meal analysis' },
     { command: 'cancel', description: 'Cancel current action' },
     { command: 'privacy', description: 'View privacy policy' },

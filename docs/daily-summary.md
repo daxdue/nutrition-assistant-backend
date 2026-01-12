@@ -15,6 +15,20 @@
 - `missingMacrosCount` counts entries where totals cannot be extracted.
 - `netKcalEstimate` is `nutritionKcal - activeCaloriesKcal` when both are present.
 
+## Hydration rollup (optional)
+- Hydration tracking is only active when `HydrationSettings.enabled` is true.
+- Intake entries are stored in `HydrationEntry` within `[dayStartUtc, dayStartUtc + 1 day)`.
+- Manual entries come from `/water` commands; provider entries come from Garmin payload hydration events or totals.
+- Manual entries are the primary source. If any manual logs exist for the day, provider totals are not added to `hydrationConsumedMl` (avoids double counting).
+- The daily target is chosen from:
+  - Manual target (`HydrationSettings.dailyTargetMl`) when `targetMode` is `MANUAL`.
+  - Recommendation when `targetMode` is `RECOMMENDED` (fallbacks to base target if no profile data).
+- Recommendation formula (current defaults):
+  - Base: `weightKg * 35ml` or 2000ml if weight is missing.
+  - Activity bonus: +350ml per 30 active minutes (capped).
+  - Temperature bonus: +200–600ml based on average/max temperature (if provided by the device).
+- Daily totals (`hydrationConsumedMl`, `hydrationManualMl`, `hydrationProviderMl`, `hydrationStatus`) are stored on `DailySummary`.
+
 ## Missing data flags
 - `MISSING_GARMIN`: no Garmin activity/recovery fields present on the day.
 - `MISSING_MEALS`: no food entries for the day.

@@ -39,6 +39,23 @@ enum ProviderAccountStatus {
   ERROR
 }
 
+enum HydrationSource {
+  MANUAL
+  PROVIDER
+}
+
+enum HydrationTargetMode {
+  MANUAL
+  RECOMMENDED
+}
+
+enum HydrationStatus {
+  ON_TRACK
+  BEHIND
+  AHEAD
+  COMPLETE
+}
+
 model User {
   id               String        @id @default(uuid())
   telegramUserId   BigInt        @unique
@@ -47,6 +64,7 @@ model User {
 
   status           UserStatus  @default(INACTIVE)
   timezone         String      @default("Europe/Istanbul")
+  weightKg         Float?
 
   dailySummaries   DailySummary[]
   garminDevices    GarminDevice[]
@@ -55,6 +73,8 @@ model User {
   pairingTokens    PairingToken[]
   providerAccounts ProviderAccount[]
   providerIngestions ProviderIngestion[]
+  hydrationSettings HydrationSettings?
+  hydrationEntries  HydrationEntry[]
 }
 
 model FoodEntry {
@@ -118,6 +138,17 @@ model DailySummary {
   netKcalEstimate       Int?
   notes                 String?
 
+  // hydration
+  hydrationTargetMl      Int?
+  hydrationRecommendedMl Int?
+  hydrationConsumedMl    Int?
+  hydrationManualMl      Int?
+  hydrationProviderMl    Int?
+  hydrationStatus        HydrationStatus?
+  hydrationTargetMode    HydrationTargetMode?
+  temperatureAvgC        Float?
+  temperatureMaxC        Float?
+
   // movement
   steps                 Int?
   activeCaloriesKcal    Int?
@@ -163,6 +194,36 @@ model DailySummary {
   updatedAt             DateTime @updatedAt
 
   @@unique([userId, date])
+}
+
+model HydrationSettings {
+  id                      String              @id @default(uuid())
+  user                    User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId                  String              @unique
+  enabled                 Boolean             @default(false)
+  targetMode              HydrationTargetMode @default(MANUAL)
+  dailyTargetMl           Int?
+  remindersEnabled        Boolean             @default(true)
+  reminderIntervalMinutes Int                 @default(120)
+  reminderStartHour       Int                 @default(9)
+  reminderEndHour         Int                 @default(21)
+  lastReminderAt          DateTime?
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
+}
+
+model HydrationEntry {
+  id            String           @id @default(uuid())
+  user          User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId        String
+  timestamp     DateTime
+  volumeMl      Int
+  source        HydrationSource
+  provider      ActivityProvider?
+  providerMeta  Json?
+  createdAt     DateTime         @default(now())
+
+  @@index([userId, timestamp])
 }
 
 model DailyAiReport {

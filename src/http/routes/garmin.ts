@@ -1,7 +1,7 @@
 // src/http/routes/garmin.ts
 import { Router, Response, NextFunction } from 'express';
 import crypto from "crypto";
-import { Prisma } from "@prisma/client";
+import { HydrationSource, Prisma } from "@prisma/client";
 import { prisma } from '../../db/client';
 import { DateTime } from "luxon";
 import { DEFAULT_TIMEZONE, getStartOfDayUtcFromEpochSeconds } from "../../utils/timezone";
@@ -10,6 +10,7 @@ import { bot } from "../../telegram/bot";
 import { apiKeyAuth, verifyDeviceId, AuthenticatedRequest } from '../middleware/apiKeyAuth';
 import { garminDeviceRateLimit } from '../middleware/rateLimit';
 import { GarminActivity, GarminActivitySummary, GarminActivitySummaryByType } from "../../interfaces/GarminActivity";
+import { createHydrationEntry, isHydrationEnabled } from "../../modules/hydration/hydration.service";
 
 export const garminRouter = Router();
 
@@ -106,6 +107,19 @@ export interface GarminDailyPayloadV2 {
     deviceName?: string;
   };
   metrics: {
+    hydration?: {
+      totalMl?: number;
+      events?: Array<{
+        timestamp?: number;
+        volumeMl?: number;
+      }>;
+    };
+    temperature?: {
+      avgC?: number;
+      maxC?: number;
+    };
+    temperatureAvgC?: number;
+    temperatureMaxC?: number;
     activeMinutes?: {
       total?: number;
       vigorous?: number;
@@ -199,6 +213,27 @@ garminRouter.post(
           : typeof metricsV1.stressAvg === 'number'
             ? metricsV1.stressAvg
             : undefined;
+      const temperatureAvgC =
+        typeof metricsV2.temperatureAvgC === 'number'
+          ? metricsV2.temperatureAvgC
+          : typeof metricsV2.temperature?.avgC === 'number'
+            ? metricsV2.temperature.avgC
+            : undefined;
+      const temperatureMaxC =
+        typeof metricsV2.temperatureMaxC === 'number'
+          ? metricsV2.temperatureMaxC
+          : typeof metricsV2.temperature?.maxC === 'number'
+            ? metricsV2.temperature.maxC
+            : undefined;
+      const hydrationTotalMl =
+        typeof metricsV2.hydration?.totalMl === 'number'
+          ? metricsV2.hydration.totalMl
+          : typeof (metricsV2 as any).hydrationMl === 'number'
+            ? (metricsV2 as any).hydrationMl
+            : typeof (metricsV2 as any).waterMl === 'number'
+              ? (metricsV2 as any).waterMl
+              : undefined;
+      const hydrationEvents = Array.isArray(metricsV2.hydration?.events) ? metricsV2.hydration.events : undefined;
       const dayStartTimestamp =
         typeof metricsV2.dayStartTimestamp === 'number' ? metricsV2.dayStartTimestamp : undefined;
 
@@ -334,6 +369,8 @@ garminRouter.post(
       setSource("spo2MinPercent", metricsV2.spo2?.minPercent);
       setSource("spo2MaxPercent", metricsV2.spo2?.maxPercent);
       setSource("spo2SampleCount", metricsV2.spo2?.sampleCount);
+      setSource("temperatureAvgC", temperatureAvgC);
+      setSource("temperatureMaxC", temperatureMaxC);
 
       const mergedMetricSources = { ...existingMetricSources, ...metricSources };
       const providerMetaJson = hasActivityData
@@ -394,6 +431,8 @@ garminRouter.post(
           spo2MinPercent: metricsV2.spo2?.minPercent ?? undefined,
           spo2MaxPercent: metricsV2.spo2?.maxPercent ?? undefined,
           spo2SampleCount: metricsV2.spo2?.sampleCount ?? undefined,
+          temperatureAvgC: temperatureAvgC ?? undefined,
+          temperatureMaxC: temperatureMaxC ?? undefined,
         },
         create: {
           userId,
@@ -437,8 +476,87 @@ garminRouter.post(
           spo2MinPercent: metricsV2.spo2?.minPercent ?? undefined,
           spo2MaxPercent: metricsV2.spo2?.maxPercent ?? undefined,
           spo2SampleCount: metricsV2.spo2?.sampleCount ?? undefined,
+          temperatureAvgC: temperatureAvgC ?? undefined,
+          temperatureMaxC: temperatureMaxC ?? undefined,
         },
       });
+
+      if ((hydrationEvents && hydrationEvents.length > 0) || typeof hydrationTotalMl === "number") {
+        const hydrationEnabled = await isHydrationEnabled(userId);
+        if (hydrationEnabled) {
+          if (hydrationEvents && hydrationEvents.length > 0) {
+            for (const event of hydrationEvents) {
+              const volumeMl = typeof event?.volumeMl === "number" ? Math.round(event.volumeMl) : null;
+              if (!volumeMl || volumeMl <= 0) {
+                continue;
+              }
+              const eventTimestamp = typeof event?.timestamp === "number" ? event.timestamp : timestamp;
+              const eventDate = new Date(eventTimestamp * 1000);
+              const existing = await prisma.hydrationEntry.findFirst({
+                where: {
+                  userId,
+                  timestamp: eventDate,
+                  volumeMl,
+                  source: HydrationSource.PROVIDER,
+                  provider: "GARMIN",
+                },
+                select: { id: true },
+              });
+              if (!existing) {
+                await createHydrationEntry({
+                  userId,
+                  volumeMl,
+                  timestamp: eventDate,
+                  source: HydrationSource.PROVIDER,
+                  provider: "GARMIN",
+                  providerMeta: {
+                    kind: "event",
+                    deviceId: deviceExternalId ?? undefined,
+                    sourceTimestamp: eventTimestamp,
+                  },
+                });
+              }
+            }
+          } else if (typeof hydrationTotalMl === "number" && hydrationTotalMl > 0) {
+            const volumeMl = Math.round(hydrationTotalMl);
+            const existing = await prisma.hydrationEntry.findFirst({
+              where: {
+                userId,
+                timestamp: dayStartUtc,
+                source: HydrationSource.PROVIDER,
+                provider: "GARMIN",
+              },
+              select: { id: true },
+            });
+            if (existing) {
+              await prisma.hydrationEntry.update({
+                where: { id: existing.id },
+                data: {
+                  volumeMl,
+                  providerMeta: {
+                    kind: "daily_total",
+                    deviceId: deviceExternalId ?? undefined,
+                    sourceTimestamp: timestamp,
+                  },
+                },
+              });
+            } else {
+              await createHydrationEntry({
+                userId,
+                volumeMl,
+                timestamp: dayStartUtc,
+                source: HydrationSource.PROVIDER,
+                provider: "GARMIN",
+                providerMeta: {
+                  kind: "daily_total",
+                  deviceId: deviceExternalId ?? undefined,
+                  sourceTimestamp: timestamp,
+                },
+              });
+            }
+          }
+        }
+      }
 
       const payloadHash = crypto
         .createHash("sha256")

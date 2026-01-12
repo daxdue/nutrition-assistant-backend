@@ -5,6 +5,7 @@ import { DAILY_REPORT_PROMPT_VERSION, generateDailyAiReport } from "../ai/dailyR
 import { DailyAiReportOutput } from "./dailyReport.types";
 import { getUtcDayRange } from "../../utils/timezone";
 import { GarminActivity, GarminActivitySummary, GarminActivitySummaryByType } from "../../interfaces/GarminActivity";
+import { computeHydrationRollup, HydrationRollup } from "../hydration/hydration.service";
 
 interface NutritionTotals {
     energyKcal?: number;
@@ -61,6 +62,8 @@ interface GarminSummaryInput {
     spo2AvgPercent: number | null;
     spo2MinPercent: number | null;
     spo2MaxPercent: number | null;
+    temperatureAvgC: number | null;
+    temperatureMaxC: number | null;
     activities?: GarminActivity[] | null;
     activitySummary?: GarminActivitySummary | null;
 }
@@ -216,6 +219,15 @@ function formatNumber(value: number, decimals = 1): string {
 
 function formatGrams(value: number): string {
     return `${formatNumber(value, 1)}g`;
+}
+
+function formatMilliliters(value: number): string {
+    if (value >= 1000) {
+        const liters = value / 1000;
+        const decimals = liters >= 10 ? 0 : 1;
+        return `${formatNumber(liters, decimals)} L`;
+    }
+    return `${Math.round(value)} ml`;
 }
 
 function formatMacroSplit(
@@ -403,6 +415,8 @@ function hasGarminData(summary: GarminSummaryInput): boolean {
         isNumber(summary.stressAvg) ||
         isNumber(summary.bodyBatteryDailyStart) ||
         isNumber(summary.bodyBatteryDailyEnd) ||
+        isNumber(summary.temperatureAvgC) ||
+        isNumber(summary.temperatureMaxC) ||
         hasActivities ||
         hasActivitySummary
     );
@@ -429,16 +443,44 @@ function extractGarminActivityMeta(providerMetaJson: unknown): {
     return { activities, activitySummary };
 }
 
+function buildHydrationInput(hydration: HydrationRollup | null, summary: GarminSummaryInput) {
+    if (!hydration) {
+        return "disabled";
+    }
+
+    return {
+        enabled: true,
+        targetMl: hydration.targetMl,
+        recommendedMl: hydration.recommendedMl,
+        targetMode: hydration.targetMode,
+        consumedMl: hydration.consumedMl,
+        manualMl: hydration.manualMl,
+        providerMl: hydration.providerMl,
+        status: hydration.status,
+        temperatureAvgC: summary.temperatureAvgC,
+        temperatureMaxC: summary.temperatureMaxC,
+        recommendation: hydration.recommendation
+            ? {
+                baseMl: hydration.recommendation.baseMl,
+                activityBonusMl: hydration.recommendation.activityBonusMl,
+                temperatureBonusMl: hydration.recommendation.temperatureBonusMl,
+            }
+            : null,
+    };
+}
+
 function buildDailyInput({
     timezone,
     dateStartUtc,
     rollup,
     summary,
+    hydration,
 }: {
     timezone: string;
     dateStartUtc: Date;
     rollup: RollupResult;
     summary: GarminSummaryInput;
+    hydration: HydrationRollup | null;
 }) {
     const localDate = DateTime.fromJSDate(dateStartUtc, { zone: "utc" }).setZone(timezone);
     const mealsMissing = rollup.mealsCount === 0;
@@ -520,6 +562,7 @@ function buildDailyInput({
                 activities: summary.activities ?? null,
                 activitySummary: summary.activitySummary ?? null,
             },
+        hydration: buildHydrationInput(hydration, summary),
         flags,
     };
 }
@@ -567,6 +610,69 @@ function buildNutritionLines(rollup: RollupResult, summary: GarminSummaryInput, 
 
     if (rollup.missingMacrosCount && rollup.missingMacrosCount > 0) {
         lines.push(`Missing macros: ${rollup.missingMacrosCount} meal${rollup.missingMacrosCount > 1 ? "s" : ""}`);
+    }
+
+    return lines;
+}
+
+function buildHydrationLines(hydration: HydrationRollup, summary: GarminSummaryInput): string[] {
+    const lines: string[] = [];
+    const target = hydration.targetMl;
+    const consumed = hydration.consumedMl;
+
+    if (isNumber(target) && target > 0) {
+        const pct = Math.round((consumed / target) * 100);
+        lines.push(`Intake: ${formatMilliliters(consumed)} / ${formatMilliliters(target)} (${pct}%)`);
+        if (hydration.targetMode) {
+            const modeLabel = hydration.targetMode === "MANUAL" ? "manual" : "recommended";
+            lines.push(`Target: ${formatMilliliters(target)} (${modeLabel})`);
+        }
+    } else {
+        lines.push(`Intake: ${formatMilliliters(consumed)}`);
+    }
+
+    if (
+        isNumber(hydration.recommendedMl) &&
+        isNumber(target) &&
+        hydration.targetMode === "MANUAL" &&
+        Math.abs(hydration.recommendedMl - target) >= 100
+    ) {
+        lines.push(`Recommended: ${formatMilliliters(hydration.recommendedMl)}`);
+    }
+
+    if (hydration.manualMl > 0 || hydration.providerMl > 0) {
+        const sources: string[] = [];
+        if (hydration.manualMl > 0) {
+            sources.push(`${formatMilliliters(hydration.manualMl)} manual`);
+        }
+        if (hydration.providerMl > 0) {
+            sources.push(`${formatMilliliters(hydration.providerMl)} provider`);
+        }
+        lines.push(`Sources: ${sources.join(", ")}`);
+        if (hydration.manualMl > 0 && hydration.providerMl > 0 && hydration.consumedMl === hydration.manualMl) {
+            lines.push("Provider intake ignored (manual logs present).");
+        }
+    }
+
+    const adjustments: string[] = [];
+    if (hydration.recommendation?.activityBonusMl && hydration.recommendation.activityBonusMl > 0) {
+        adjustments.push(`+${formatMilliliters(hydration.recommendation.activityBonusMl)} activity`);
+    }
+    if (hydration.recommendation?.temperatureBonusMl && hydration.recommendation.temperatureBonusMl > 0) {
+        adjustments.push(`+${formatMilliliters(hydration.recommendation.temperatureBonusMl)} heat`);
+    }
+    if (adjustments.length > 0) {
+        lines.push(`Adjustments: ${adjustments.join(", ")}`);
+    }
+
+    const tempAvg = isNumber(summary.temperatureAvgC) ? summary.temperatureAvgC : null;
+    const tempMax = isNumber(summary.temperatureMaxC) ? summary.temperatureMaxC : null;
+    if (tempAvg !== null && tempMax !== null) {
+        lines.push(`Temp: avg ${formatNumber(tempAvg, 1)} C, max ${formatNumber(tempMax, 1)} C`);
+    } else if (tempAvg !== null) {
+        lines.push(`Temp avg: ${formatNumber(tempAvg, 1)} C`);
+    } else if (tempMax !== null) {
+        lines.push(`Temp max: ${formatNumber(tempMax, 1)} C`);
     }
 
     return lines;
@@ -760,12 +866,14 @@ function renderDailyMessage({
     dateStartUtc,
     rollup,
     summary,
+    hydration,
     aiOutput,
 }: {
     timezone: string;
     dateStartUtc: Date;
     rollup: RollupResult;
     summary: GarminSummaryInput;
+    hydration: HydrationRollup | null;
     aiOutput: DailyAiReportOutput;
 }) {
     const localDate = DateTime.fromJSDate(dateStartUtc, { zone: "utc" }).setZone(timezone);
@@ -791,6 +899,14 @@ function renderDailyMessage({
         lines.push(`- ${escapeMarkdown(line)}`);
     });
     lines.push("");
+
+    if (hydration) {
+        lines.push("*Hydration*");
+        buildHydrationLines(hydration, summary).forEach((line) => {
+            lines.push(`- ${escapeMarkdown(line)}`);
+        });
+        lines.push("");
+    }
 
     lines.push("*Activity*");
     if (!hasGarminData(summary)) {
@@ -905,16 +1021,61 @@ export async function computeAndUpsertDailyRollup(userId: string, timezone: stri
             ? rollup.nutritionKcal - dailySummary.activeCaloriesKcal
             : null;
 
+    const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { weightKg: true },
+    });
+
+    const hydration = await computeHydrationRollup({
+        userId,
+        dayStartUtc,
+        timezone,
+        weightKg: user?.weightKg ?? null,
+        activeMinutesTotal: dailySummary.activeMinutesTotal,
+        activeMinutesModerate: dailySummary.activeMinutesModerate,
+        activeMinutesVigorous: dailySummary.activeMinutesVigorous,
+        activeCaloriesKcal: dailySummary.activeCaloriesKcal,
+        temperatureAvgC: dailySummary.temperatureAvgC,
+        temperatureMaxC: dailySummary.temperatureMaxC,
+    });
+
+    const hydrationUpdate = hydration
+        ? {
+            hydrationTargetMl: hydration.targetMl,
+            hydrationRecommendedMl: hydration.recommendedMl,
+            hydrationConsumedMl: hydration.consumedMl,
+            hydrationManualMl: hydration.manualMl,
+            hydrationProviderMl: hydration.providerMl,
+            hydrationStatus: hydration.status,
+            hydrationTargetMode: hydration.targetMode,
+        }
+        : {
+            hydrationTargetMl: null,
+            hydrationRecommendedMl: null,
+            hydrationConsumedMl: null,
+            hydrationManualMl: null,
+            hydrationProviderMl: null,
+            hydrationStatus: null,
+            hydrationTargetMode: null,
+        };
+
+    const updateData: Prisma.DailySummaryUpdateInput = {
+        ...hydrationUpdate,
+    };
+
     if (dailySummary.netKcalEstimate !== netKcalEstimate) {
-        await prisma.dailySummary.update({
-            where: { id: dailySummary.id },
-            data: {
-                netKcalEstimate,
-            },
-        });
+        updateData.netKcalEstimate = netKcalEstimate;
     }
 
-    return { dailySummary, rollup };
+    const updatedSummary =
+        Object.keys(updateData).length > 0
+            ? await prisma.dailySummary.update({
+                where: { id: dailySummary.id },
+                data: updateData,
+            })
+            : dailySummary;
+
+    return { dailySummary: updatedSummary, rollup, hydration };
 }
 
 export async function ensureDailyAiReportForUserDay({
@@ -928,7 +1089,7 @@ export async function ensureDailyAiReportForUserDay({
     dayStartUtc: Date;
     force?: boolean;
 }) {
-    const { dailySummary, rollup } = await computeAndUpsertDailyRollup(userId, timezone, dayStartUtc);
+    const { dailySummary, rollup, hydration } = await computeAndUpsertDailyRollup(userId, timezone, dayStartUtc);
 
     const existing = await prisma.dailyAiReport.findUnique({
         where: { dailySummaryId: dailySummary.id },
@@ -963,6 +1124,8 @@ export async function ensureDailyAiReportForUserDay({
         spo2AvgPercent: dailySummary.spo2AvgPercent,
         spo2MinPercent: dailySummary.spo2MinPercent,
         spo2MaxPercent: dailySummary.spo2MaxPercent,
+        temperatureAvgC: dailySummary.temperatureAvgC,
+        temperatureMaxC: dailySummary.temperatureMaxC,
         activities: activities ?? null,
         activitySummary: activitySummary ?? null,
     };
@@ -972,6 +1135,7 @@ export async function ensureDailyAiReportForUserDay({
         dateStartUtc: dailySummary.date,
         rollup,
         summary: summaryData,
+        hydration,
     });
 
     if (existing && !force) {
@@ -999,6 +1163,7 @@ export async function ensureDailyAiReportForUserDay({
         dateStartUtc: dailySummary.date,
         rollup,
         summary: summaryData,
+        hydration,
         aiOutput: finalOutput,
     });
 
