@@ -2,11 +2,21 @@
 import { Telegraf, Context } from 'telegraf';
 import { message } from 'telegraf/filters';
 import axios from 'axios';
+import { DateTime } from 'luxon';
 
 import { prisma } from '../db/client';
 import { processMealPhotoTask } from '../modules/tasks/processMealPhotoTask';
 import { generatePairingToken } from '../services/garmin.service';
+import {
+  applyMealCorrection,
+  MealCorrectionInvalidAnalysisError,
+  MealCorrectionLimitError,
+  MealCorrectionNotFoundError,
+  MealCorrectionRejectedError,
+} from '../services/mealCorrection.service';
 import { ensureDailyAiReportForUserDay } from '../modules/dailySummary/dailySummary.service';
+import { MAX_MEAL_CORRECTIONS_PER_ENTRY } from '../config/limits';
+import { formatNutritionSummary } from '../utils/formatNutrition';
 import { DEFAULT_TIMEZONE, getStartOfDayUtcFromDate } from '../utils/timezone';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -20,6 +30,70 @@ const ADMIN_TELEGRAM_ID = Number(process.env.ADMIN_TELEGRAM_ID);
 const PRIVACY_URL = "https://nutrition-miniapp-933t8h3ax-daxdues-projects.vercel.app/privacy.html";
 const BACKEND_URL = process.env.BACKEND_URL || process.env.PUBLIC_URL || 'http://localhost:3000';
 const MINIAPP_URL = process.env.FRONTEND_ORIGIN || "https://nutrition-miniapp-933t8h3ax-daxdues-projects.vercel.app";
+
+function stripMarkdown(text: string): string {
+  return text.replace(/\\([_*`[\]])/g, "$1").replace(/[*_`]/g, "");
+}
+
+async function replyMarkdownWithFallback(ctx: Context, text: string) {
+  try {
+    await ctx.reply(text, { parse_mode: "Markdown" });
+  } catch (error) {
+    console.error("Failed to send Markdown message, falling back to plain text:", error);
+    await ctx.reply(stripMarkdown(text));
+  }
+}
+
+const CORRECTION_MENU_LIMIT = 6;
+const CORRECTION_SESSION_TTL_MS = 10 * 60 * 1000;
+
+type PendingCorrectionSession = {
+  entryId: string;
+  expiresAt: number;
+  promptMessageId?: number;
+};
+
+const pendingCorrections = new Map<string, PendingCorrectionSession>();
+
+function getCorrectionsRemaining(correctionCount: number | null): number {
+  return Math.max(0, MAX_MEAL_CORRECTIONS_PER_ENTRY - (correctionCount ?? 0));
+}
+
+function setCorrectionSession(userId: string, session: PendingCorrectionSession) {
+  pendingCorrections.set(userId, session);
+}
+
+function clearCorrectionSession(userId: string) {
+  pendingCorrections.delete(userId);
+}
+
+function formatMealEntrySummary(entry: any, timezone: string) {
+  const raw = entry.aiParsedJson as any | null;
+  const items = Array.isArray(raw?.items) ? raw.items : [];
+  const itemNames = items
+    .map((item: any) => (typeof item?.name === 'string' ? item.name : null))
+    .filter((name: string | null) => Boolean(name)) as string[];
+  const mealType = typeof raw?.meal_type === 'string' ? raw.meal_type : null;
+  const isUnknownMeal = mealType ? mealType.toLowerCase() === 'unknown' : true;
+  const baseName =
+    itemNames.length > 0
+      ? `${itemNames.slice(0, 2).join(', ')}${itemNames.length > 2 ? '...' : ''}`
+      : mealType && !isUnknownMeal
+        ? mealType
+        : 'Meal';
+  const kcalValue =
+    typeof raw?.total_estimated_kcal === 'number'
+      ? raw.total_estimated_kcal
+      : typeof entry.energyKcal === 'number'
+        ? entry.energyKcal
+        : null;
+  const kcalText = typeof kcalValue === 'number' ? `${Math.round(kcalValue)} kcal` : 'kcal n/a';
+  const time = DateTime.fromJSDate(entry.timestamp, { zone: 'utc' })
+    .setZone(timezone)
+    .toFormat('HH:mm');
+
+  return { time, name: baseName, kcalText };
+}
 
 /**
  * Find or create a user record based on Telegram user id.
@@ -304,7 +378,7 @@ bot.command("summary", async (ctx) => {
       return ctx.reply("No summary is available yet for today.");
     }
 
-    await ctx.reply(report.messageText);
+    await replyMarkdownWithFallback(ctx, report.messageText);
     await prisma.dailyAiReport.update({
       where: { id: report.id },
       data: { sentAt: new Date() },
@@ -312,6 +386,239 @@ bot.command("summary", async (ctx) => {
   } catch (error) {
     console.error("Failed to generate summary:", error);
     await ctx.reply("Sorry, I couldn't generate your summary right now.");
+  }
+});
+
+bot.command("fix", async (ctx) => {
+  const user = await getOrCreateUser(ctx);
+
+  if (!user) {
+    return ctx.reply(
+      "🚫 You are not authorized to use this bot.\n" +
+      "Use /start to submit an access request."
+    );
+  }
+
+  if (user.status !== "ACTIVE") {
+    return ctx.reply(
+      "⏳ Your access request is pending.\n" +
+      "You’ll be able to correct meals once an admin approves it."
+    );
+  }
+
+  if (MAX_MEAL_CORRECTIONS_PER_ENTRY <= 0) {
+    return ctx.reply("Meal corrections are currently disabled.");
+  }
+
+  clearCorrectionSession(user.id);
+
+  const timezone = user.timezone ?? DEFAULT_TIMEZONE;
+  const recentEntries = await prisma.foodEntry.findMany({
+    where: { userId: user.id },
+    orderBy: { timestamp: "desc" },
+    take: CORRECTION_MENU_LIMIT,
+  });
+
+  const entries = recentEntries.filter((entry) => {
+    const raw = entry.aiParsedJson as any | null;
+    return raw && typeof raw === "object" && Array.isArray(raw.items);
+  });
+
+  if (entries.length === 0) {
+    return ctx.reply("No recent meals found to correct yet.");
+  }
+
+  const lines = entries.map((entry, idx) => {
+    const remaining = getCorrectionsRemaining(entry.correctionCount ?? 0);
+    const remainingText = remaining === 1 ? "1 edit left" : `${remaining} edits left`;
+    const summary = formatMealEntrySummary(entry, timezone);
+    return `${idx + 1}) ${summary.time} • ${summary.name} • ${summary.kcalText} • ${remainingText}`;
+  });
+
+  const keyboard: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let i = 0; i < entries.length; i += 2) {
+    const row: Array<{ text: string; callback_data: string }> = [];
+    for (let j = i; j < i + 2 && j < entries.length; j += 1) {
+      row.push({
+        text: `${j + 1}`,
+        callback_data: `fix_entry:${entries[j].id}`,
+      });
+    }
+    keyboard.push(row);
+  }
+  keyboard.push([{ text: "Cancel", callback_data: "fix_cancel" }]);
+
+  await ctx.reply(
+    "🛠 Meal corrections\n\n" +
+      "Select a meal to fix (tap a number below):\n" +
+      lines.join("\n") +
+      "\n\n" +
+      "Tip: you can correct meal name, portion grams, or meal type. Each upload has a limited number of edits. Send /cancel to stop.",
+    { reply_markup: { inline_keyboard: keyboard } }
+  );
+});
+
+bot.command("cancel", async (ctx) => {
+  const user = await getOrCreateUser(ctx);
+
+  if (!user) {
+    return ctx.reply(
+      "🚫 You are not authorized to use this bot.\n" +
+      "Use /start to submit an access request."
+    );
+  }
+
+  const hadSession = pendingCorrections.has(user.id);
+  clearCorrectionSession(user.id);
+  await ctx.reply(
+    hadSession
+      ? "Canceled. Use /fix whenever you want to correct a meal."
+      : "Nothing to cancel right now. Use /fix to start a correction."
+  );
+});
+
+bot.action("fix_cancel", async (ctx) => {
+  const user = await getOrCreateUser(ctx);
+  if (user) {
+    clearCorrectionSession(user.id);
+  }
+  await ctx.answerCbQuery("Canceled");
+  await ctx.reply("Canceled. Use /fix whenever you want to correct a meal.");
+});
+
+bot.action(/fix_entry:(.+)/, async (ctx) => {
+  try {
+    const user = await getOrCreateUser(ctx);
+    if (!user) {
+      await ctx.answerCbQuery("User not found", { show_alert: true });
+      return;
+    }
+
+    const match = ctx.match as RegExpMatchArray;
+    const entryId = match[1];
+
+    const entry = await prisma.foodEntry.findFirst({
+      where: { id: entryId, userId: user.id },
+    });
+
+    if (!entry) {
+      await ctx.answerCbQuery("Meal not found", { show_alert: true });
+      return;
+    }
+
+    const remaining = getCorrectionsRemaining(entry.correctionCount ?? 0);
+    if (remaining <= 0) {
+      await ctx.answerCbQuery("No edits left for this meal", { show_alert: true });
+      return;
+    }
+
+    const timezone = user.timezone ?? DEFAULT_TIMEZONE;
+    const summary = formatMealEntrySummary(entry, timezone);
+    const promptText =
+      `Selected: ${summary.time} • ${summary.name} • ${summary.kcalText}\n\n` +
+      "Reply with your correction. Examples:\n" +
+      '- "Banana was 150g, not 80g"\n' +
+      '- "This was greek yogurt, not oatmeal"\n' +
+      '- "Meal type is Lunch"\n\n' +
+      `You have ${remaining} edit${remaining === 1 ? "" : "s"} left for this upload. ` +
+      "This request expires in 10 minutes. Send /cancel to stop.";
+
+    const promptMessage = await ctx.reply(promptText, {
+      reply_markup: {
+        force_reply: true,
+        input_field_placeholder: 'e.g., "Banana was 150g"',
+      },
+    });
+
+    setCorrectionSession(user.id, {
+      entryId,
+      expiresAt: Date.now() + CORRECTION_SESSION_TTL_MS,
+      promptMessageId: promptMessage.message_id,
+    });
+
+    await ctx.answerCbQuery("Send your correction text");
+  } catch (error) {
+    console.error("Failed to start correction flow:", error);
+    await ctx.answerCbQuery("Something went wrong", { show_alert: true });
+  }
+});
+
+bot.on(message("text"), async (ctx, next) => {
+  const text = ctx.message.text;
+  if (!text) {
+    return next();
+  }
+  if (text.startsWith("/")) {
+    return next();
+  }
+
+  const user = await getOrCreateUser(ctx);
+  if (!user) {
+    return;
+  }
+
+  const session = pendingCorrections.get(user.id);
+  if (!session) {
+    return next();
+  }
+
+  if (session.expiresAt <= Date.now()) {
+    pendingCorrections.delete(user.id);
+    await ctx.reply("That correction session expired. Use /fix to start again.");
+    return;
+  }
+
+  if (text.trim().toLowerCase() === "cancel") {
+    clearCorrectionSession(user.id);
+    await ctx.reply("Canceled. Use /fix whenever you want to correct a meal.");
+    return;
+  }
+
+  if (session.promptMessageId && ctx.message.reply_to_message?.message_id) {
+    if (ctx.message.reply_to_message.message_id !== session.promptMessageId) {
+      await ctx.reply("Please reply to the correction prompt or send /cancel.");
+      return;
+    }
+  }
+
+  clearCorrectionSession(user.id);
+
+  try {
+    const result = await applyMealCorrection({
+      entryId: session.entryId,
+      userId: user.id,
+      correctionText: text,
+    });
+
+    const header =
+      `✅ Updated. Corrections remaining: ${result.correctionsRemaining}/${result.maxCorrections}\n\n`;
+    const summary = result.entry.aiParsedJson
+      ? formatNutritionSummary(result.entry.aiParsedJson)
+      : "No updated analysis is available.";
+
+    await replyMarkdownWithFallback(ctx, header + summary);
+  } catch (error) {
+    if (error instanceof MealCorrectionLimitError) {
+      await ctx.reply("No edits left for this meal. Use /fix to pick another one.");
+      return;
+    }
+    if (error instanceof MealCorrectionNotFoundError) {
+      await ctx.reply("That meal could not be found. Use /fix to choose another.");
+      return;
+    }
+    if (error instanceof MealCorrectionInvalidAnalysisError) {
+      await ctx.reply("I couldn't apply that correction. Try again with /fix.");
+      return;
+    }
+    if (error instanceof MealCorrectionRejectedError) {
+      await ctx.reply(
+        "That correction was rejected by the model and still counted toward the limit. Use /fix to try again."
+      );
+      return;
+    }
+
+    console.error("Failed to apply correction:", error);
+    await ctx.reply("Sorry, I couldn't apply that correction right now.");
   }
 });
 
@@ -486,6 +793,8 @@ export async function launchBot() {
     { command: 'start', description: 'Start the bot' },
     { command: 'pair', description: 'Pair Garmin watch' },
     { command: 'stats', description: 'Open nutrition stats' },
+    { command: 'fix', description: 'Correct a meal analysis' },
+    { command: 'cancel', description: 'Cancel current action' },
     { command: 'privacy', description: 'View privacy policy' },
     { command: 'summary', description: 'Daily summary' },
     // later: { command: 'delete', description: 'Delete my data' },

@@ -53,6 +53,49 @@ export const processImage = async (
     }
 
     const parsed = JSON.parse(rawText) as MealAnalysisResult;
-    
+
+    return parsed;
+};
+
+export const processText = async (
+    systemPrompt: string,
+    responseFormat: any,
+    inputTexts: string[],
+): Promise<MealAnalysisResult> => {
+    const content =
+        inputTexts && inputTexts.length > 0
+            ? inputTexts.map((text) => ({ type: "input_text" as const, text }))
+            : [{ type: "input_text" as const, text: "No input provided." }];
+
+    const response = await openai.responses.create({
+        model: model,
+        input: [
+            {
+                role: "system",
+                content: [{ type: "input_text", text: systemPrompt }],
+            },
+            {
+                role: "user",
+                content,
+            },
+        ],
+        text: {
+            format: {
+                type: "json_schema",
+                name: "nutrition_analysis",
+                strict: true,
+                schema: responseFormat,
+            },
+        },
+    });
+
+    const rawText = (response as any).output_text as string | null;
+
+    if (!rawText) {
+        throw new Error("OpenAI response did not contain output_text");
+    }
+
+    const parsed = JSON.parse(rawText) as MealAnalysisResult;
+
     return parsed;
 };

@@ -10,4 +10,5 @@ export type MealAnalysisResult = Prisma.JsonObject & {
     meal_type: MealType;
     items: NutritionItem[];
     total_estimated_kcal: number;
+    total_estimated_fiber_g: number;
 }

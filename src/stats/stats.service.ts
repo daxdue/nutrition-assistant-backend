@@ -1,5 +1,6 @@
 import { DateTime } from "luxon";
 import { prisma } from "../db/client";
+import { MAX_MEAL_CORRECTIONS_PER_ENTRY } from "../config/limits";
 import { DEFAULT_TIMEZONE } from "../utils/timezone";
 
 export interface FoodItem {
@@ -26,6 +27,8 @@ export interface StatsResponse {
         imagePathOrUrl: string;
         captionText: string | null;
         aiParsedJson: ParsedJson | null;
+        correctionCount: number;
+        correctionsRemaining: number;
     }[];
 }
 
@@ -86,6 +89,11 @@ export async function getUserStatsForLastNDays(
             imagePathOrUrl: entry.imagePathOrUrl,
             captionText: entry.captionText,
             aiParsedJson: parsed,
+            correctionCount: entry.correctionCount ?? 0,
+            correctionsRemaining: Math.max(
+                0,
+                MAX_MEAL_CORRECTIONS_PER_ENTRY - (entry.correctionCount ?? 0)
+            ),
         };
     });
 

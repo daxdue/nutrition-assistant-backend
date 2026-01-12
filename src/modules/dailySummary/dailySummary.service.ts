@@ -4,12 +4,14 @@ import { prisma } from "../../db/client";
 import { DAILY_REPORT_PROMPT_VERSION, generateDailyAiReport } from "../ai/dailyReport.service";
 import { DailyAiReportOutput } from "./dailyReport.types";
 import { getUtcDayRange } from "../../utils/timezone";
+import { GarminActivity, GarminActivitySummary, GarminActivitySummaryByType } from "../../interfaces/GarminActivity";
 
 interface NutritionTotals {
     energyKcal?: number;
     proteinG?: number;
     carbsG?: number;
     fatG?: number;
+    fiberG?: number;
 }
 
 interface RollupResult {
@@ -18,6 +20,7 @@ interface RollupResult {
     nutritionProteinG: number | null;
     nutritionCarbsG: number | null;
     nutritionFatG: number | null;
+    nutritionFiberG: number | null;
     firstMealAt: Date | null;
     lastMealAt: Date | null;
     missingMacrosCount: number | null;
@@ -30,8 +33,68 @@ interface RollupResult {
     }>;
 }
 
+interface GarminSummaryInput {
+    steps: number | null;
+    activeCaloriesKcal: number | null;
+    restingCaloriesKcal: number | null;
+    totalCaloriesBurned: number | null;
+    totalCaloriesKcal: number | null;
+    activeMinutesTotal: number | null;
+    activeMinutesVigorous: number | null;
+    activeMinutesModerate: number | null;
+    distanceCm: number | null;
+    floorsClimbed: number | null;
+    floorsDescended: number | null;
+    stressAvg: number | null;
+    stressMin: number | null;
+    stressMax: number | null;
+    heartRateAvgBpm: number | null;
+    heartRateMaxBpm: number | null;
+    heartRateMinBpm: number | null;
+    bodyBatteryDailyStart: number | null;
+    bodyBatteryDailyEnd: number | null;
+    bodyBatteryDailyMin: number | null;
+    bodyBatteryDailyMax: number | null;
+    bodyBatteryDailyCharged: number | null;
+    bodyBatteryDailyDrained: number | null;
+    bodyBatteryDailyNetChange: number | null;
+    spo2AvgPercent: number | null;
+    spo2MinPercent: number | null;
+    spo2MaxPercent: number | null;
+    activities?: GarminActivity[] | null;
+    activitySummary?: GarminActivitySummary | null;
+}
+
 function isNumber(value: unknown): value is number {
     return typeof value === "number" && Number.isFinite(value);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeForHash(value: unknown): unknown {
+    if (Array.isArray(value)) {
+        return value.map((item) => {
+            const normalized = normalizeForHash(item);
+            return normalized === undefined ? null : normalized;
+        });
+    }
+    if (isRecord(value)) {
+        const normalized: Record<string, unknown> = {};
+        for (const key of Object.keys(value).sort()) {
+            const entry = normalizeForHash(value[key]);
+            if (entry !== undefined) {
+                normalized[key] = entry;
+            }
+        }
+        return normalized;
+    }
+    return value;
+}
+
+export function buildDailyInputHash(value: unknown): string {
+    return JSON.stringify(normalizeForHash(value));
 }
 
 function extractTotalsFromJson(raw: unknown): NutritionTotals | null {
@@ -47,16 +110,21 @@ function extractTotalsFromJson(raw: unknown): NutritionTotals | null {
         const proteinG = isNumber(totals.protein_g) ? totals.protein_g : undefined;
         const carbsG = isNumber(totals.carbs_g) ? totals.carbs_g : undefined;
         const fatG = isNumber(totals.fat_g) ? totals.fat_g : undefined;
-        if (energyKcal || proteinG || carbsG || fatG) {
-            return { energyKcal, proteinG, carbsG, fatG };
+        const fiberG = isNumber(totals.fiber_g) ? totals.fiber_g : undefined;
+        if (energyKcal || proteinG || carbsG || fatG || fiberG) {
+            return { energyKcal, proteinG, carbsG, fatG, fiberG };
         }
     }
 
     const items = Array.isArray(asAny.items) ? asAny.items : null;
     if (!items) {
         const totalEstimated = asAny.total_estimated_kcal;
-        if (isNumber(totalEstimated)) {
-            return { energyKcal: totalEstimated };
+        const totalEstimatedFiber = asAny.total_estimated_fiber_g;
+        if (isNumber(totalEstimated) || isNumber(totalEstimatedFiber)) {
+            return {
+                energyKcal: isNumber(totalEstimated) ? totalEstimated : undefined,
+                fiberG: isNumber(totalEstimatedFiber) ? totalEstimatedFiber : undefined,
+            };
         }
         return null;
     }
@@ -65,6 +133,7 @@ function extractTotalsFromJson(raw: unknown): NutritionTotals | null {
     let proteinG = 0;
     let carbsG = 0;
     let fatG = 0;
+    let fiberG = 0;
     let hasAny = false;
 
     for (const item of items) {
@@ -75,6 +144,7 @@ function extractTotalsFromJson(raw: unknown): NutritionTotals | null {
         const protein = (item as any).protein_g;
         const carbs = (item as any).carbs_g;
         const fat = (item as any).fat_g;
+        const fiber = (item as any).fiber_g;
 
         if (isNumber(energy)) {
             energyKcal += energy;
@@ -92,6 +162,10 @@ function extractTotalsFromJson(raw: unknown): NutritionTotals | null {
             fatG += fat;
             hasAny = true;
         }
+        if (isNumber(fiber)) {
+            fiberG += fiber;
+            hasAny = true;
+        }
     }
 
     if (!hasAny) {
@@ -103,6 +177,7 @@ function extractTotalsFromJson(raw: unknown): NutritionTotals | null {
         proteinG: proteinG > 0 ? proteinG : undefined,
         carbsG: carbsG > 0 ? carbsG : undefined,
         fatG: fatG > 0 ? fatG : undefined,
+        fiberG: fiberG > 0 ? fiberG : undefined,
     };
 }
 
@@ -114,16 +189,100 @@ function normalizeTotals(totals: NutritionTotals | null): NutritionTotals | null
     const proteinG = isNumber(totals.proteinG) ? totals.proteinG : undefined;
     const carbsG = isNumber(totals.carbsG) ? totals.carbsG : undefined;
     const fatG = isNumber(totals.fatG) ? totals.fatG : undefined;
+    const fiberG = isNumber(totals.fiberG) ? totals.fiberG : undefined;
 
-    if (!energyKcal && !proteinG && !carbsG && !fatG) {
+    if (!energyKcal && !proteinG && !carbsG && !fatG && !fiberG) {
         return null;
     }
 
-    return { energyKcal, proteinG, carbsG, fatG };
+    return { energyKcal, proteinG, carbsG, fatG, fiberG };
 }
 
 function roundTo1(value: number): number {
     return Math.round(value * 10) / 10;
+}
+
+function escapeMarkdown(text: string): string {
+    return text.replace(/([\\_*`[\]])/g, "\\$1");
+}
+
+function normalizeAiText(text: string): string {
+    return text.replace(/\s+/g, " ").trim();
+}
+
+function formatNumber(value: number, decimals = 1): string {
+    return Number.isInteger(value) ? `${value}` : value.toFixed(decimals);
+}
+
+function formatGrams(value: number): string {
+    return `${formatNumber(value, 1)}g`;
+}
+
+function formatMacroSplit(
+    proteinG: number | null,
+    carbsG: number | null,
+    fatG: number | null
+): string | null {
+    if (!isNumber(proteinG) || !isNumber(carbsG) || !isNumber(fatG)) {
+        return null;
+    }
+
+    const total = proteinG * 4 + carbsG * 4 + fatG * 9;
+    if (total <= 0) {
+        return null;
+    }
+
+    const proteinPct = Math.round((proteinG * 4 / total) * 100);
+    const carbsPct = Math.round((carbsG * 4 / total) * 100);
+    const fatPct = Math.round((fatG * 9 / total) * 100);
+
+    return `${proteinPct}% P / ${carbsPct}% C / ${fatPct}% F`;
+}
+
+function formatTimeLocal(value: Date, timezone: string): string {
+    return DateTime.fromJSDate(value, { zone: "utc" }).setZone(timezone).toFormat("HH:mm");
+}
+
+function formatMealWindow(firstMealAt: Date | null, lastMealAt: Date | null, timezone: string): string | null {
+    if (firstMealAt && lastMealAt) {
+        return `${formatTimeLocal(firstMealAt, timezone)}-${formatTimeLocal(lastMealAt, timezone)}`;
+    }
+    if (firstMealAt) {
+        return `from ${formatTimeLocal(firstMealAt, timezone)}`;
+    }
+    if (lastMealAt) {
+        return `until ${formatTimeLocal(lastMealAt, timezone)}`;
+    }
+    return null;
+}
+
+function formatDuration(seconds: number): string {
+    const totalMinutes = Math.round(seconds / 60);
+    if (totalMinutes >= 60) {
+        const hours = Math.floor(totalMinutes / 60);
+        const minutes = totalMinutes % 60;
+        return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+    }
+    return `${Math.max(totalMinutes, 1)}m`;
+}
+
+function formatDistance(distanceCm: number): string {
+    const km = distanceCm / 100000;
+    if (km >= 1) {
+        const kmText = km < 10 ? km.toFixed(1) : Math.round(km).toString();
+        return `${kmText} km`;
+    }
+    const meters = Math.round(distanceCm / 100);
+    return `${meters} m`;
+}
+
+function formatActivityLabel(raw: string): string {
+    const trimmed = raw.trim();
+    if (!trimmed) {
+        return "";
+    }
+    const normalized = trimmed.replace(/[_-]+/g, " ").toLowerCase();
+    return normalized.replace(/\b\w/g, (match) => match.toUpperCase());
 }
 
 function computeRollup(entries: Array<{
@@ -133,6 +292,7 @@ function computeRollup(entries: Array<{
     proteinG: number | null;
     carbsG: number | null;
     fatG: number | null;
+    fiberG: number | null;
     aiParsedJson: unknown;
 }>): RollupResult {
     const mealsCount = entries.length;
@@ -142,6 +302,7 @@ function computeRollup(entries: Array<{
     let totalProtein = 0;
     let totalCarbs = 0;
     let totalFat = 0;
+    let totalFiber = 0;
     let hasAnyTotals = false;
     let missingMacrosCount = 0;
 
@@ -151,6 +312,7 @@ function computeRollup(entries: Array<{
             proteinG: entry.proteinG ?? undefined,
             carbsG: entry.carbsG ?? undefined,
             fatG: entry.fatG ?? undefined,
+            fiberG: entry.fiberG ?? undefined,
         });
         const parsed = normalized ?? extractTotalsFromJson(entry.aiParsedJson);
         const totals = parsed ? normalizeTotals(parsed) : null;
@@ -183,6 +345,10 @@ function computeRollup(entries: Array<{
                 totalFat += totals.fatG;
                 hasAnyTotals = true;
             }
+            if (isNumber(totals.fiberG)) {
+                totalFiber += totals.fiberG;
+                hasAnyTotals = true;
+            }
         }
 
         mealList.push({
@@ -210,6 +376,7 @@ function computeRollup(entries: Array<{
         nutritionProteinG: hasAnyTotals ? roundTo1(totalProtein) : null,
         nutritionCarbsG: hasAnyTotals ? roundTo1(totalCarbs) : null,
         nutritionFatG: hasAnyTotals ? roundTo1(totalFat) : null,
+        nutritionFiberG: hasAnyTotals ? roundTo1(totalFiber) : null,
         firstMealAt,
         lastMealAt,
         missingMacrosCount: mealsCount > 0 ? missingMacrosCount : null,
@@ -218,24 +385,48 @@ function computeRollup(entries: Array<{
     };
 }
 
-function hasGarminData(summary: {
-    steps: number | null;
-    activeCaloriesKcal: number | null;
-    activeMinutesTotal: number | null;
-    heartRateAvgBpm: number | null;
-    stressAvg: number | null;
-    bodyBatteryDailyStart: number | null;
-    bodyBatteryDailyEnd: number | null;
-}): boolean {
+function hasGarminData(summary: GarminSummaryInput): boolean {
+    const hasActivities = Array.isArray(summary.activities) && summary.activities.length > 0;
+    const hasActivitySummary =
+        Boolean(summary.activitySummary) &&
+        (isNumber(summary.activitySummary?.totalCount) ||
+            (Array.isArray(summary.activitySummary?.byType) && summary.activitySummary.byType.length > 0));
+
     return (
         isNumber(summary.steps) ||
         isNumber(summary.activeCaloriesKcal) ||
         isNumber(summary.activeMinutesTotal) ||
+        isNumber(summary.totalCaloriesKcal) ||
+        isNumber(summary.totalCaloriesBurned) ||
+        isNumber(summary.distanceCm) ||
         isNumber(summary.heartRateAvgBpm) ||
         isNumber(summary.stressAvg) ||
         isNumber(summary.bodyBatteryDailyStart) ||
-        isNumber(summary.bodyBatteryDailyEnd)
+        isNumber(summary.bodyBatteryDailyEnd) ||
+        hasActivities ||
+        hasActivitySummary
     );
+}
+
+function extractGarminActivityMeta(providerMetaJson: unknown): {
+    activities?: GarminActivity[];
+    activitySummary?: GarminActivitySummary;
+} {
+    if (!isRecord(providerMetaJson)) {
+        return {};
+    }
+
+    const garminMeta = providerMetaJson.garmin;
+    if (!isRecord(garminMeta)) {
+        return {};
+    }
+
+    const activities = Array.isArray(garminMeta.activities) ? (garminMeta.activities as GarminActivity[]) : undefined;
+    const activitySummary = isRecord(garminMeta.activitySummary)
+        ? (garminMeta.activitySummary as GarminActivitySummary)
+        : undefined;
+
+    return { activities, activitySummary };
 }
 
 function buildDailyInput({
@@ -247,28 +438,7 @@ function buildDailyInput({
     timezone: string;
     dateStartUtc: Date;
     rollup: RollupResult;
-    summary: {
-        steps: number | null;
-        activeCaloriesKcal: number | null;
-        activeMinutesTotal: number | null;
-        activeMinutesVigorous: number | null;
-        activeMinutesModerate: number | null;
-        stressAvg: number | null;
-        stressMax: number | null;
-        heartRateAvgBpm: number | null;
-        heartRateMaxBpm: number | null;
-        heartRateMinBpm: number | null;
-        bodyBatteryDailyStart: number | null;
-        bodyBatteryDailyEnd: number | null;
-        bodyBatteryDailyMin: number | null;
-        bodyBatteryDailyMax: number | null;
-        bodyBatteryDailyCharged: number | null;
-        bodyBatteryDailyDrained: number | null;
-        bodyBatteryDailyNetChange: number | null;
-        spo2AvgPercent: number | null;
-        spo2MinPercent: number | null;
-        spo2MaxPercent: number | null;
-    };
+    summary: GarminSummaryInput;
 }) {
     const localDate = DateTime.fromJSDate(dateStartUtc, { zone: "utc" }).setZone(timezone);
     const mealsMissing = rollup.mealsCount === 0;
@@ -307,6 +477,7 @@ function buildDailyInput({
             nutritionProteinG: rollup.nutritionProteinG,
             nutritionCarbsG: rollup.nutritionCarbsG,
             nutritionFatG: rollup.nutritionFatG,
+            nutritionFiberG: rollup.nutritionFiberG,
             firstMealAt: rollup.firstMealAt?.toISOString() ?? null,
             lastMealAt: rollup.lastMealAt?.toISOString() ?? null,
             missingMacrosCount: rollup.missingMacrosCount,
@@ -321,10 +492,17 @@ function buildDailyInput({
             : {
                 steps: summary.steps,
                 activeCaloriesKcal: summary.activeCaloriesKcal,
+                restingCaloriesKcal: summary.restingCaloriesKcal,
+                totalCaloriesBurned: summary.totalCaloriesBurned,
+                totalCaloriesKcal: summary.totalCaloriesKcal,
                 activeMinutesTotal: summary.activeMinutesTotal,
                 activeMinutesVigorous: summary.activeMinutesVigorous,
                 activeMinutesModerate: summary.activeMinutesModerate,
+                distanceCm: summary.distanceCm,
+                floorsClimbed: summary.floorsClimbed,
+                floorsDescended: summary.floorsDescended,
                 stressAvg: summary.stressAvg,
+                stressMin: summary.stressMin,
                 stressMax: summary.stressMax,
                 heartRateAvgBpm: summary.heartRateAvgBpm,
                 heartRateMaxBpm: summary.heartRateMaxBpm,
@@ -339,55 +517,242 @@ function buildDailyInput({
                 spo2AvgPercent: summary.spo2AvgPercent,
                 spo2MinPercent: summary.spo2MinPercent,
                 spo2MaxPercent: summary.spo2MaxPercent,
+                activities: summary.activities ?? null,
+                activitySummary: summary.activitySummary ?? null,
             },
         flags,
     };
 }
 
-function formatNutritionTotals(summary: {
-    mealsCount: number | null;
-    nutritionKcal: number | null;
-    nutritionProteinG: number | null;
-    nutritionCarbsG: number | null;
-    nutritionFatG: number | null;
-    missingMacrosCount: number | null;
-}) {
-    if (!summary.mealsCount || summary.mealsCount === 0) {
-        return "Nutrition: no meals logged.";
+function buildNutritionLines(rollup: RollupResult, summary: GarminSummaryInput, timezone: string): string[] {
+    const lines: string[] = [];
+
+    if (!rollup.mealsCount || rollup.mealsCount === 0) {
+        lines.push("No meals logged.");
+        return lines;
     }
 
-    const kcal = isNumber(summary.nutritionKcal) ? `${summary.nutritionKcal} kcal` : "kcal n/a";
-    const protein = isNumber(summary.nutritionProteinG) ? `${summary.nutritionProteinG}g P` : "P n/a";
-    const carbs = isNumber(summary.nutritionCarbsG) ? `${summary.nutritionCarbsG}g C` : "C n/a";
-    const fat = isNumber(summary.nutritionFatG) ? `${summary.nutritionFatG}g F` : "F n/a";
-    const missing = summary.missingMacrosCount ? `, missing macros: ${summary.missingMacrosCount}` : "";
-    return `Nutrition: ${summary.mealsCount} meals, ${kcal}, ${protein} / ${carbs} / ${fat}${missing}.`;
+    const mealWindow = formatMealWindow(rollup.firstMealAt, rollup.lastMealAt, timezone);
+    const mealsLine = mealWindow
+        ? `Meals: ${rollup.mealsCount} (${mealWindow})`
+        : `Meals: ${rollup.mealsCount}`;
+    lines.push(mealsLine);
+
+    if (isNumber(rollup.nutritionKcal)) {
+        lines.push(`Intake: ${Math.round(rollup.nutritionKcal)} kcal`);
+    }
+
+    const macroParts: string[] = [];
+    if (isNumber(rollup.nutritionProteinG)) macroParts.push(`${formatGrams(rollup.nutritionProteinG)} P`);
+    if (isNumber(rollup.nutritionCarbsG)) macroParts.push(`${formatGrams(rollup.nutritionCarbsG)} C`);
+    if (isNumber(rollup.nutritionFatG)) macroParts.push(`${formatGrams(rollup.nutritionFatG)} F`);
+    if (macroParts.length > 0) {
+        lines.push(`Macros: ${macroParts.join(" / ")}`);
+    }
+
+    if (isNumber(rollup.nutritionFiberG)) {
+        lines.push(`Fiber: ${formatGrams(rollup.nutritionFiberG)}`);
+    }
+
+    const split = formatMacroSplit(rollup.nutritionProteinG, rollup.nutritionCarbsG, rollup.nutritionFatG);
+    if (split) {
+        lines.push(`Macro split: ${split}`);
+    }
+
+    if (isNumber(rollup.nutritionKcal) && isNumber(summary.activeCaloriesKcal)) {
+        const net = Math.round(rollup.nutritionKcal - summary.activeCaloriesKcal);
+        const sign = net >= 0 ? "+" : "";
+        lines.push(`Net vs active: ${sign}${net} kcal`);
+    }
+
+    if (rollup.missingMacrosCount && rollup.missingMacrosCount > 0) {
+        lines.push(`Missing macros: ${rollup.missingMacrosCount} meal${rollup.missingMacrosCount > 1 ? "s" : ""}`);
+    }
+
+    return lines;
 }
 
-function formatGarminSummary(summary: {
-    steps: number | null;
-    activeCaloriesKcal: number | null;
-    activeMinutesTotal: number | null;
-    stressAvg: number | null;
-    heartRateAvgBpm: number | null;
-    bodyBatteryDailyStart: number | null;
-    bodyBatteryDailyEnd: number | null;
-}) {
-    if (!hasGarminData(summary)) {
-        return "Garmin: no watch data for this day.";
+function formatActivityList(items: string[]): string {
+    const maxItems = 3;
+    const visible = items.slice(0, maxItems);
+    const remaining = items.length - visible.length;
+    const suffix = remaining > 0 ? ` +${remaining} more` : "";
+    return `${visible.join(", ")}${suffix}`;
+}
+
+function formatActivityType(entry: GarminActivitySummaryByType): string | null {
+    const typeLabel = typeof entry.type === "string" ? formatActivityLabel(entry.type) : "";
+    if (!typeLabel) {
+        return null;
+    }
+    if (isNumber(entry.durationSeconds) && entry.durationSeconds > 0) {
+        return `${typeLabel} ${formatDuration(entry.durationSeconds)}`;
+    }
+    if (isNumber(entry.count)) {
+        return `${typeLabel} x${entry.count}`;
+    }
+    return typeLabel;
+}
+
+function formatActivitySummary(summary: GarminSummaryInput): string | null {
+    const byType = summary.activitySummary?.byType;
+    if (Array.isArray(byType) && byType.length > 0) {
+        const labels = byType
+            .map((entry) => formatActivityType(entry))
+            .filter((label): label is string => Boolean(label));
+        if (labels.length > 0) {
+            return formatActivityList(labels);
+        }
     }
 
-    const parts: string[] = [];
-    if (isNumber(summary.steps)) parts.push(`steps ${summary.steps}`);
-    if (isNumber(summary.activeCaloriesKcal)) parts.push(`active kcal ${summary.activeCaloriesKcal}`);
-    if (isNumber(summary.activeMinutesTotal)) parts.push(`active mins ${summary.activeMinutesTotal}`);
-    if (isNumber(summary.stressAvg)) parts.push(`stress avg ${summary.stressAvg}`);
-    if (isNumber(summary.heartRateAvgBpm)) parts.push(`hr avg ${summary.heartRateAvgBpm} bpm`);
+    if (Array.isArray(summary.activities) && summary.activities.length > 0) {
+        const types = new Set<string>();
+        for (const activity of summary.activities) {
+            if (!activity || typeof activity !== "object") {
+                continue;
+            }
+            if (typeof activity.type === "string" && activity.type.trim().length > 0) {
+                const label = formatActivityLabel(activity.type);
+                if (label) {
+                    types.add(label);
+                }
+            }
+        }
+        const labels = Array.from(types);
+        if (labels.length > 0) {
+            return formatActivityList(labels);
+        }
+    }
+
+    return null;
+}
+
+function getActivityDistanceCm(summary: GarminSummaryInput): number | null {
+    if (isNumber(summary.activitySummary?.totalDistanceCm)) {
+        return summary.activitySummary.totalDistanceCm;
+    }
+    if (!Array.isArray(summary.activities) || summary.activities.length === 0) {
+        return null;
+    }
+    let total = 0;
+    let hasAny = false;
+    for (const activity of summary.activities) {
+        if (!activity || typeof activity !== "object") {
+            continue;
+        }
+        if (isNumber(activity.distanceCm)) {
+            total += activity.distanceCm;
+            hasAny = true;
+        }
+    }
+    return hasAny ? total : null;
+}
+
+function buildActivityLines(summary: GarminSummaryInput): string[] {
+    const lines: string[] = [];
+
+    if (isNumber(summary.steps)) {
+        lines.push(`Steps: ${Math.round(summary.steps)}`);
+    }
+
+    if (isNumber(summary.activeMinutesTotal)) {
+        const parts: string[] = [];
+        if (isNumber(summary.activeMinutesVigorous)) parts.push(`vig ${summary.activeMinutesVigorous}`);
+        if (isNumber(summary.activeMinutesModerate)) parts.push(`mod ${summary.activeMinutesModerate}`);
+        const detail = parts.length > 0 ? ` (${parts.join(", ")})` : "";
+        lines.push(`Active: ${summary.activeMinutesTotal} min${detail}`);
+    }
+
+    if (isNumber(summary.activeCaloriesKcal)) {
+        lines.push(`Active kcal: ${Math.round(summary.activeCaloriesKcal)}`);
+    }
+
+    const totalBurned = isNumber(summary.totalCaloriesBurned)
+        ? summary.totalCaloriesBurned
+        : isNumber(summary.totalCaloriesKcal)
+            ? summary.totalCaloriesKcal
+            : null;
+    if (isNumber(totalBurned)) {
+        const detailParts: string[] = [];
+        if (isNumber(summary.restingCaloriesKcal)) {
+            detailParts.push(`resting ${Math.round(summary.restingCaloriesKcal)}`);
+        }
+        if (isNumber(summary.activeCaloriesKcal)) {
+            detailParts.push(`active ${Math.round(summary.activeCaloriesKcal)}`);
+        }
+        const detail = detailParts.length > 0 ? ` (${detailParts.join(" + ")})` : "";
+        lines.push(`Total burned: ${Math.round(totalBurned)} kcal${detail}`);
+    } else if (isNumber(summary.restingCaloriesKcal)) {
+        lines.push(`Resting kcal: ${Math.round(summary.restingCaloriesKcal)}`);
+    }
+
+    const stepsDistance = isNumber(summary.distanceCm) && summary.distanceCm > 0 ? summary.distanceCm : null;
+    const activityDistance = getActivityDistanceCm(summary);
+    let totalDistance: number | null = null;
+    if (stepsDistance !== null && activityDistance !== null) {
+        let stepsBased = false;
+        if (isNumber(summary.steps) && summary.steps > 0) {
+            const strideCm = stepsDistance / summary.steps;
+            stepsBased = strideCm >= 30 && strideCm <= 150;
+        }
+        totalDistance = stepsBased ? stepsDistance + activityDistance : Math.max(stepsDistance, activityDistance);
+    } else {
+        totalDistance = stepsDistance ?? activityDistance;
+    }
+    if (totalDistance !== null) {
+        lines.push(`Total distance: ${formatDistance(totalDistance)}`);
+    }
+
+    if (isNumber(summary.floorsClimbed) || isNumber(summary.floorsDescended)) {
+        const climbed = isNumber(summary.floorsClimbed) ? `+${summary.floorsClimbed}` : "n/a";
+        const descended = isNumber(summary.floorsDescended) ? `-${summary.floorsDescended}` : "n/a";
+        lines.push(`Floors: ${climbed} / ${descended}`);
+    }
+
+    const activitySummary = formatActivitySummary(summary);
+    if (activitySummary) {
+        lines.push(`Types: ${activitySummary}`);
+    }
+
+    return lines.length > 0 ? lines : ["Activities logged."];
+}
+
+function buildRecoveryLines(summary: GarminSummaryInput): string[] {
+    const lines: string[] = [];
+
+    if (isNumber(summary.stressAvg)) {
+        const detailParts: string[] = [];
+        if (isNumber(summary.stressMin)) detailParts.push(`min ${formatNumber(summary.stressMin, 0)}`);
+        if (isNumber(summary.stressMax)) detailParts.push(`max ${formatNumber(summary.stressMax, 0)}`);
+        const detail = detailParts.length > 0 ? ` (${detailParts.join(", ")})` : "";
+        lines.push(`Stress avg: ${formatNumber(summary.stressAvg, 1)}${detail}`);
+    }
+
+    if (isNumber(summary.heartRateAvgBpm)) {
+        const detailParts: string[] = [];
+        if (isNumber(summary.heartRateMinBpm)) detailParts.push(`min ${summary.heartRateMinBpm}`);
+        if (isNumber(summary.heartRateMaxBpm)) detailParts.push(`max ${summary.heartRateMaxBpm}`);
+        const detail = detailParts.length > 0 ? ` (${detailParts.join(", ")})` : "";
+        lines.push(`HR avg: ${summary.heartRateAvgBpm} bpm${detail}`);
+    }
+
     if (isNumber(summary.bodyBatteryDailyStart) && isNumber(summary.bodyBatteryDailyEnd)) {
-        parts.push(`body battery ${summary.bodyBatteryDailyStart}→${summary.bodyBatteryDailyEnd}`);
+        const detailParts: string[] = [];
+        if (isNumber(summary.bodyBatteryDailyMin)) detailParts.push(`min ${summary.bodyBatteryDailyMin}`);
+        if (isNumber(summary.bodyBatteryDailyMax)) detailParts.push(`max ${summary.bodyBatteryDailyMax}`);
+        const detail = detailParts.length > 0 ? ` (${detailParts.join(", ")})` : "";
+        lines.push(`Body battery: ${summary.bodyBatteryDailyStart} -> ${summary.bodyBatteryDailyEnd}${detail}`);
     }
 
-    return `Garmin: ${parts.join(", ")}.`;
+    if (isNumber(summary.spo2AvgPercent)) {
+        const detailParts: string[] = [];
+        if (isNumber(summary.spo2MinPercent)) detailParts.push(`min ${formatNumber(summary.spo2MinPercent, 0)}%`);
+        if (isNumber(summary.spo2MaxPercent)) detailParts.push(`max ${formatNumber(summary.spo2MaxPercent, 0)}%`);
+        const detail = detailParts.length > 0 ? ` (${detailParts.join(", ")})` : "";
+        lines.push(`SpO2 avg: ${formatNumber(summary.spo2AvgPercent, 0)}%${detail}`);
+    }
+
+    return lines;
 }
 
 function renderDailyMessage({
@@ -400,15 +765,7 @@ function renderDailyMessage({
     timezone: string;
     dateStartUtc: Date;
     rollup: RollupResult;
-    summary: {
-        steps: number | null;
-        activeCaloriesKcal: number | null;
-        activeMinutesTotal: number | null;
-        stressAvg: number | null;
-        heartRateAvgBpm: number | null;
-        bodyBatteryDailyStart: number | null;
-        bodyBatteryDailyEnd: number | null;
-    };
+    summary: GarminSummaryInput;
     aiOutput: DailyAiReportOutput;
 }) {
     const localDate = DateTime.fromJSDate(dateStartUtc, { zone: "utc" }).setZone(timezone);
@@ -423,40 +780,64 @@ function renderDailyMessage({
                 : null;
 
     const lines: string[] = [];
-    lines.push(`Daily Summary (${localDate.toISODate()})`);
+    lines.push(`*Daily Summary - ${escapeMarkdown(localDate.toISODate() ?? "")}*`);
     if (basisLine) {
-        lines.push(basisLine);
+        lines.push(`_${escapeMarkdown(basisLine)}_`);
     }
-    lines.push(formatNutritionTotals({
-        mealsCount: rollup.mealsCount,
-        nutritionKcal: rollup.nutritionKcal,
-        nutritionProteinG: rollup.nutritionProteinG,
-        nutritionCarbsG: rollup.nutritionCarbsG,
-        nutritionFatG: rollup.nutritionFatG,
-        missingMacrosCount: rollup.missingMacrosCount,
-    }));
-    lines.push(formatGarminSummary(summary));
-    lines.push(`Summary: ${aiOutput.summary}`);
+    lines.push("");
+
+    lines.push("*Nutrition*");
+    buildNutritionLines(rollup, summary, timezone).forEach((line) => {
+        lines.push(`- ${escapeMarkdown(line)}`);
+    });
+    lines.push("");
+
+    lines.push("*Activity*");
+    if (!hasGarminData(summary)) {
+        lines.push("- No watch data for this day.");
+    } else {
+        buildActivityLines(summary).forEach((line) => {
+            lines.push(`- ${escapeMarkdown(line)}`);
+        });
+    }
+    lines.push("");
+
+    const recoveryLines = buildRecoveryLines(summary);
+    if (recoveryLines.length > 0) {
+        lines.push("*Recovery*");
+        recoveryLines.forEach((line) => {
+            lines.push(`- ${escapeMarkdown(line)}`);
+        });
+        lines.push("");
+    }
+
+    lines.push("*AI Summary*");
+    lines.push(escapeMarkdown(normalizeAiText(aiOutput.summary)));
 
     if (aiOutput.bullets.length > 0) {
-        lines.push("Highlights:");
-        aiOutput.bullets.forEach((bullet, index) => {
-            lines.push(`${index + 1}. ${bullet}`);
+        lines.push("");
+        lines.push("*Highlights*");
+        aiOutput.bullets.forEach((bullet) => {
+            lines.push(`- ${escapeMarkdown(normalizeAiText(bullet))}`);
         });
     }
 
     if (aiOutput.tips.length > 0) {
-        lines.push("Tips:");
-        aiOutput.tips.forEach((tip, index) => {
-            lines.push(`${index + 1}. ${tip}`);
+        lines.push("");
+        lines.push("*Tips*");
+        aiOutput.tips.forEach((tip) => {
+            lines.push(`- ${escapeMarkdown(normalizeAiText(tip))}`);
         });
     }
 
     if (aiOutput.flags.length > 0) {
-        lines.push(`Flags: ${aiOutput.flags.join(", ")}`);
+        lines.push("");
+        const flagsText = aiOutput.flags.map((flag) => flag.replace(/_/g, " ")).join(", ");
+        lines.push(`_Flags: ${escapeMarkdown(flagsText)}_`);
     }
 
-    lines.push("Disclaimer: This is not medical advice.");
+    lines.push("");
+    lines.push("_Disclaimer: This is not medical advice._");
 
     return lines.join("\n");
 }
@@ -482,6 +863,7 @@ export async function computeAndUpsertDailyRollup(userId: string, timezone: stri
             proteinG: entry.proteinG,
             carbsG: entry.carbsG,
             fatG: entry.fatG,
+            fiberG: entry.fiberG,
             aiParsedJson: entry.aiParsedJson,
         }))
     );
@@ -495,6 +877,7 @@ export async function computeAndUpsertDailyRollup(userId: string, timezone: stri
             nutritionProteinG: rollup.nutritionProteinG,
             nutritionCarbsG: rollup.nutritionCarbsG,
             nutritionFatG: rollup.nutritionFatG,
+            nutritionFiberG: rollup.nutritionFiberG,
             firstMealAt: rollup.firstMealAt,
             lastMealAt: rollup.lastMealAt,
             missingMacrosCount: rollup.missingMacrosCount,
@@ -509,6 +892,7 @@ export async function computeAndUpsertDailyRollup(userId: string, timezone: stri
             nutritionProteinG: rollup.nutritionProteinG,
             nutritionCarbsG: rollup.nutritionCarbsG,
             nutritionFatG: rollup.nutritionFatG,
+            nutritionFiberG: rollup.nutritionFiberG,
             firstMealAt: rollup.firstMealAt,
             lastMealAt: rollup.lastMealAt,
             missingMacrosCount: rollup.missingMacrosCount,
@@ -549,17 +933,22 @@ export async function ensureDailyAiReportForUserDay({
     const existing = await prisma.dailyAiReport.findUnique({
         where: { dailySummaryId: dailySummary.id },
     });
-    if (existing && !force) {
-        return existing;
-    }
 
+    const { activities, activitySummary } = extractGarminActivityMeta(dailySummary.providerMetaJson);
     const summaryData = {
         steps: dailySummary.steps,
         activeCaloriesKcal: dailySummary.activeCaloriesKcal,
+        restingCaloriesKcal: dailySummary.restingCaloriesKcal,
+        totalCaloriesBurned: dailySummary.totalCaloriesBurned,
+        totalCaloriesKcal: dailySummary.totalCaloriesKcal,
         activeMinutesTotal: dailySummary.activeMinutesTotal,
         activeMinutesVigorous: dailySummary.activeMinutesVigorous,
         activeMinutesModerate: dailySummary.activeMinutesModerate,
+        distanceCm: dailySummary.distanceCm,
+        floorsClimbed: dailySummary.floorsClimbed,
+        floorsDescended: dailySummary.floorsDescended,
         stressAvg: dailySummary.stressAvg,
+        stressMin: dailySummary.stressMin,
         stressMax: dailySummary.stressMax,
         heartRateAvgBpm: dailySummary.heartRateAvgBpm,
         heartRateMaxBpm: dailySummary.heartRateMaxBpm,
@@ -574,6 +963,8 @@ export async function ensureDailyAiReportForUserDay({
         spo2AvgPercent: dailySummary.spo2AvgPercent,
         spo2MinPercent: dailySummary.spo2MinPercent,
         spo2MaxPercent: dailySummary.spo2MaxPercent,
+        activities: activities ?? null,
+        activitySummary: activitySummary ?? null,
     };
 
     const inputJson = buildDailyInput({
@@ -582,6 +973,17 @@ export async function ensureDailyAiReportForUserDay({
         rollup,
         summary: summaryData,
     });
+
+    if (existing && !force) {
+        const existingHash = buildDailyInputHash(existing.inputJson);
+        if (
+            existing.messageText &&
+            existing.promptVersion === DAILY_REPORT_PROMPT_VERSION &&
+            existingHash === buildDailyInputHash(inputJson)
+        ) {
+            return existing;
+        }
+    }
 
     const aiOutput = await generateDailyAiReport(inputJson);
     const inputFlags = Array.isArray((inputJson as any).flags) ? (inputJson as any).flags : [];
@@ -596,15 +998,7 @@ export async function ensureDailyAiReportForUserDay({
         timezone,
         dateStartUtc: dailySummary.date,
         rollup,
-        summary: {
-            steps: dailySummary.steps,
-            activeCaloriesKcal: dailySummary.activeCaloriesKcal,
-            activeMinutesTotal: dailySummary.activeMinutesTotal,
-            stressAvg: dailySummary.stressAvg,
-            heartRateAvgBpm: dailySummary.heartRateAvgBpm,
-            bodyBatteryDailyStart: dailySummary.bodyBatteryDailyStart,
-            bodyBatteryDailyEnd: dailySummary.bodyBatteryDailyEnd,
-        },
+        summary: summaryData,
         aiOutput: finalOutput,
     });
 

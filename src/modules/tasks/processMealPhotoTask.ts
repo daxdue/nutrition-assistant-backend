@@ -4,7 +4,7 @@ import { prisma } from "../../db/client";
 import { bot } from "../../telegram/bot";
 import { formatNutritionSummary } from "../../utils/formatNutrition";
 import { recordAbuseAndMaybeBan } from "../../services/abuse.service";
-import { NutritionItem } from "../../interfaces/NutritionItem";
+import { deriveEntryTotals } from "../../utils/mealAnalysis";
 
 interface ProcessMealPhotoArgs {
     imageUrl: string;
@@ -13,19 +13,6 @@ interface ProcessMealPhotoArgs {
     chatId: number;
     caption: string;
 };
-
-function sumMacro(items: NutritionItem[], key: "protein_g" | "carbs_g" | "fat_g"): number | null {
-    let total = 0;
-    let hasAny = false;
-    for (const item of items) {
-        const value = item[key];
-        if (typeof value === "number" && Number.isFinite(value)) {
-            total += value;
-            hasAny = true;
-        }
-    }
-    return hasAny ? total : null;
-}
 
 export async function processMealPhotoTask({
     imageUrl,
@@ -70,11 +57,7 @@ export async function processMealPhotoTask({
             return;
         }
 
-        const items: NutritionItem[] = Array.isArray(analysis.items) ? analysis.items : [];
-        const energyKcal = typeof analysis.total_estimated_kcal === "number" ? Math.round(analysis.total_estimated_kcal) : null;
-        const proteinG = sumMacro(items, "protein_g");
-        const carbsG = sumMacro(items, "carbs_g");
-        const fatG = sumMacro(items, "fat_g");
+        const { energyKcal, proteinG, carbsG, fatG, fiberG } = deriveEntryTotals(analysis);
 
         await prisma.foodEntry.create({
             data: {
@@ -87,10 +70,13 @@ export async function processMealPhotoTask({
                 proteinG,
                 carbsG,
                 fatG,
+                fiberG,
             },
         });
 
-        const summary = formatNutritionSummary(analysis);
+        const summary =
+            formatNutritionSummary(analysis) +
+            "\n\n✏️ If something looks off, use /fix to correct this meal.";
 
         await bot.telegram.sendMessage(chatId, summary, {
             parse_mode: "Markdown",
