@@ -55,6 +55,7 @@ async function replyMarkdownWithFallback(ctx: Context, text: string) {
 
 const CORRECTION_MENU_LIMIT = 6;
 const CORRECTION_SESSION_TTL_MS = 10 * 60 * 1000;
+const WATER_PRESET_ML = [150, 200, 250, 300, 350, 500, 750, 1000];
 
 type PendingCorrectionSession = {
   entryId: string;
@@ -102,6 +103,56 @@ function formatMealEntrySummary(entry: any, timezone: string) {
     .toFormat('HH:mm');
 
   return { time, name: baseName, kcalText };
+}
+
+function buildWaterQuickKeyboard() {
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let i = 0; i < WATER_PRESET_ML.length; i += 2) {
+    const row: Array<{ text: string; callback_data: string }> = [];
+    for (let j = i; j < i + 2 && j < WATER_PRESET_ML.length; j += 1) {
+      const amount = WATER_PRESET_ML[j];
+      row.push({
+        text: formatHydrationTargetHint(amount),
+        callback_data: `water_add:${amount}`,
+      });
+    }
+    rows.push(row);
+  }
+  rows.push([{ text: "Close", callback_data: "water_cancel" }]);
+  return { inline_keyboard: rows };
+}
+
+async function logWaterEntry(
+  user: { id: string; timezone: string | null; weightKg: number | null },
+  volumeMl: number,
+  timestamp?: Date
+) {
+  const entry = await createHydrationEntryIfEnabled({
+    userId: user.id,
+    volumeMl,
+    timestamp,
+    source: HydrationSource.MANUAL,
+  });
+
+  if (!entry) {
+    return {
+      ok: false,
+      message: "Hydration tracking is disabled. Enable it with /hydration on 2500 or /hydration auto.",
+    };
+  }
+
+  const hydration = await getHydrationRollupForToday(user);
+  if (hydration?.targetMl) {
+    const consumedText = formatHydrationTargetHint(hydration.consumedMl);
+    const targetText = formatHydrationTargetHint(hydration.targetMl);
+    const pct = Math.round((hydration.consumedMl / hydration.targetMl) * 100);
+    return {
+      ok: true,
+      message: `Logged ${formatHydrationTargetHint(volumeMl)}. Today: ${consumedText} / ${targetText} (${pct}%).`,
+    };
+  }
+
+  return { ok: true, message: `Logged ${formatHydrationTargetHint(volumeMl)}.` };
 }
 
 async function getHydrationRollupForToday(user: { id: string; timezone: string | null; weightKg: number | null }) {
@@ -176,7 +227,7 @@ async function buildHydrationStatusMessage(user: { id: string; timezone: string 
     message += " Reminders off.";
   }
 
-  message += " Log water with /water 250.";
+  message += " Log water with /water and tap an amount.";
   return message;
 }
 
@@ -494,36 +545,21 @@ bot.command("water", async (ctx) => {
   const text = ("text" in (ctx.message ?? {}) ? (ctx.message as any).text : "") as string;
   const args = text.split(" ").slice(1).join(" ").trim();
   if (!args) {
-    return ctx.reply("Usage: /water 250 (ml) or /water 0.5l or /water 8oz");
+    return ctx.reply("Tap to log water:", { reply_markup: buildWaterQuickKeyboard() });
   }
 
   const volumeMl = parseHydrationVolumeToMl(args);
   if (!volumeMl) {
-    return ctx.reply("Could not parse that amount. Try /water 250, /water 0.5l, or /water 8oz.");
+    return ctx.reply("Could not parse that amount. Tap /water for quick buttons.");
   }
 
-  const entry = await createHydrationEntryIfEnabled({
-    userId: user.id,
+  const result = await logWaterEntry(
+    user,
     volumeMl,
-    timestamp: ctx.message && "date" in ctx.message ? new Date((ctx.message as any).date * 1000) : undefined,
-    source: HydrationSource.MANUAL,
-  });
+    ctx.message && "date" in ctx.message ? new Date((ctx.message as any).date * 1000) : undefined
+  );
 
-  if (!entry) {
-    return ctx.reply("Hydration tracking is disabled. Enable it with /hydration on 2500 or /hydration auto.");
-  }
-
-  const hydration = await getHydrationRollupForToday(user);
-  if (hydration?.targetMl) {
-    const consumedText = formatHydrationTargetHint(hydration.consumedMl);
-    const targetText = formatHydrationTargetHint(hydration.targetMl);
-    const pct = Math.round((hydration.consumedMl / hydration.targetMl) * 100);
-    return ctx.reply(
-      `Logged ${formatHydrationTargetHint(volumeMl)}. Today: ${consumedText} / ${targetText} (${pct}%).`
-    );
-  }
-
-  return ctx.reply(`Logged ${formatHydrationTargetHint(volumeMl)}.`);
+  return ctx.reply(result.message, { reply_markup: buildWaterQuickKeyboard() });
 });
 
 bot.command("hydration", async (ctx) => {
@@ -617,6 +653,48 @@ bot.command("hydration", async (ctx) => {
     "/hydration target 2500\n" +
     "/hydration off"
   );
+});
+
+bot.action(/water_add:(\d+)/, async (ctx) => {
+  try {
+    const user = await getOrCreateUser(ctx);
+    if (!user || user.status !== "ACTIVE") {
+      await ctx.answerCbQuery("Not authorized", { show_alert: true });
+      return;
+    }
+
+    const match = ctx.match as RegExpMatchArray;
+    const amount = Number.parseInt(match[1], 10);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      await ctx.answerCbQuery("Invalid amount", { show_alert: true });
+      return;
+    }
+
+    const result = await logWaterEntry(user, amount);
+    await ctx.answerCbQuery(result.ok ? "Logged" : "Hydration disabled", { show_alert: !result.ok });
+
+    try {
+      await ctx.editMessageText(result.message, { reply_markup: buildWaterQuickKeyboard() });
+    } catch (error) {
+      await ctx.reply(result.message, { reply_markup: buildWaterQuickKeyboard() });
+    }
+  } catch (error) {
+    console.error("Failed to log water:", error);
+    await ctx.answerCbQuery("Something went wrong", { show_alert: true });
+  }
+});
+
+bot.action("water_cancel", async (ctx) => {
+  try {
+    await ctx.answerCbQuery("Closed");
+    try {
+      await ctx.deleteMessage();
+    } catch (error) {
+      // ignore if message can't be deleted
+    }
+  } catch (error) {
+    console.error("Failed to close water picker:", error);
+  }
 });
 
 bot.command("weight", async (ctx) => {
