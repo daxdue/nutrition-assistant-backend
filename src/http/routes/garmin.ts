@@ -4,13 +4,13 @@ import crypto from "crypto";
 import { HydrationSource, Prisma } from "@prisma/client";
 import { prisma } from '../../db/client';
 import { DateTime } from "luxon";
-import { DEFAULT_TIMEZONE, getStartOfDayUtcFromEpochSeconds } from "../../utils/timezone";
-import { ensureDailyAiReportForUserDay, buildDailyInputHash } from "../../modules/dailySummary/dailySummary.service";
+import { DEFAULT_TIMEZONE, getStartOfDayUtcFromDate, getStartOfDayUtcFromEpochSeconds, getUtcDayRange } from "../../utils/timezone";
+import { ensureDailyAiReportForUserDay, buildDailyInputHash, computeRollup } from "../../modules/dailySummary/dailySummary.service";
 import { bot } from "../../telegram/bot";
 import { apiKeyAuth, verifyDeviceId, AuthenticatedRequest } from '../middleware/apiKeyAuth';
 import { garminDeviceRateLimit } from '../middleware/rateLimit';
 import { GarminActivity, GarminActivitySummary, GarminActivitySummaryByType } from "../../interfaces/GarminActivity";
-import { createHydrationEntry, isHydrationEnabled } from "../../modules/hydration/hydration.service";
+import { computeHydrationRollup, createHydrationEntry, isHydrationEnabled } from "../../modules/hydration/hydration.service";
 
 export const garminRouter = Router();
 
@@ -170,6 +170,97 @@ export interface GarminDailyPayloadV2 {
 // Apply rate limiting and API key authentication middleware to all routes
 garminRouter.use(garminDeviceRateLimit());
 garminRouter.use(apiKeyAuth);
+
+garminRouter.get(
+  '/stats/today',
+  async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const deviceUserId = req.device?.userId;
+      if (!deviceUserId) {
+        return res.status(403).json({ error: 'Device not authenticated' });
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { id: deviceUserId },
+        select: { timezone: true, weightKg: true },
+      });
+
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      const timezone = user.timezone ?? DEFAULT_TIMEZONE;
+      const dayStartUtc = getStartOfDayUtcFromDate(new Date(), timezone);
+      const { start, end } = getUtcDayRange(dayStartUtc);
+
+      const entries = await prisma.foodEntry.findMany({
+        where: {
+          userId: deviceUserId,
+          timestamp: { gte: start, lt: end },
+        },
+        orderBy: { timestamp: 'asc' },
+        select: {
+          id: true,
+          timestamp: true,
+          energyKcal: true,
+          proteinG: true,
+          carbsG: true,
+          fatG: true,
+          fiberG: true,
+          aiParsedJson: true,
+        },
+      });
+
+      const rollup = computeRollup(entries);
+
+      const dailySummary = await prisma.dailySummary.findUnique({
+        where: { userId_date: { userId: deviceUserId, date: dayStartUtc } },
+        select: {
+          activeMinutesTotal: true,
+          activeMinutesModerate: true,
+          activeMinutesVigorous: true,
+          activeCaloriesKcal: true,
+          temperatureAvgC: true,
+          temperatureMaxC: true,
+        },
+      });
+
+      const hydration = await computeHydrationRollup({
+        userId: deviceUserId,
+        dayStartUtc,
+        timezone,
+        weightKg: user.weightKg ?? null,
+        activeMinutesTotal: dailySummary?.activeMinutesTotal ?? null,
+        activeMinutesModerate: dailySummary?.activeMinutesModerate ?? null,
+        activeMinutesVigorous: dailySummary?.activeMinutesVigorous ?? null,
+        activeCaloriesKcal: dailySummary?.activeCaloriesKcal ?? null,
+        temperatureAvgC: dailySummary?.temperatureAvgC ?? null,
+        temperatureMaxC: dailySummary?.temperatureMaxC ?? null,
+      });
+
+      const dateLocal = DateTime.fromJSDate(dayStartUtc, { zone: "utc" })
+        .setZone(timezone)
+        .toISODate();
+
+      return res.json({
+        date: dateLocal,
+        timezone,
+        totalMeals: rollup.mealsCount,
+        totalKcal: rollup.nutritionKcal,
+        totalProteinG: rollup.nutritionProteinG,
+        totalCarbsG: rollup.nutritionCarbsG,
+        totalFatG: rollup.nutritionFatG,
+        totalFiberG: rollup.nutritionFiberG,
+        hydrationEnabled: Boolean(hydration),
+        hydrationConsumedMl: hydration?.consumedMl ?? null,
+        hydrationTargetMl: hydration?.targetMl ?? null,
+        hydrationStatus: hydration?.status ?? null,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 garminRouter.post(
   '/daily',

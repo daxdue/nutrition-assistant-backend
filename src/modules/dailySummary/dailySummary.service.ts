@@ -7,7 +7,7 @@ import { getUtcDayRange } from "../../utils/timezone";
 import { GarminActivity, GarminActivitySummary, GarminActivitySummaryByType } from "../../interfaces/GarminActivity";
 import { computeHydrationRollup, HydrationRollup } from "../hydration/hydration.service";
 
-interface NutritionTotals {
+export interface NutritionTotals {
     energyKcal?: number;
     proteinG?: number;
     carbsG?: number;
@@ -15,7 +15,7 @@ interface NutritionTotals {
     fiberG?: number;
 }
 
-interface RollupResult {
+export interface RollupResult {
     mealsCount: number;
     nutritionKcal: number | null;
     nutritionProteinG: number | null;
@@ -297,7 +297,7 @@ function formatActivityLabel(raw: string): string {
     return normalized.replace(/\b\w/g, (match) => match.toUpperCase());
 }
 
-function computeRollup(entries: Array<{
+export function computeRollup(entries: Array<{
     id: string;
     timestamp: Date;
     energyKcal: number | null;
