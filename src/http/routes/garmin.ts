@@ -238,6 +238,38 @@ garminRouter.get(
         temperatureMaxC: dailySummary?.temperatureMaxC ?? null,
       });
 
+      let hydrationLastConsumedAtEpoch: number | null = null;
+      if (hydration) {
+        const recentHydrationEntries = await prisma.hydrationEntry.findMany({
+          where: {
+            userId: deviceUserId,
+            timestamp: { gte: start, lt: end },
+          },
+          orderBy: { timestamp: 'desc' },
+          take: 10,
+          select: {
+            timestamp: true,
+            source: true,
+            providerMeta: true,
+          },
+        });
+
+        const lastEntry = recentHydrationEntries.find((entry) => {
+          if (entry.source === "MANUAL") {
+            return true;
+          }
+          const meta = entry.providerMeta;
+          if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+            return (meta as Record<string, unknown>).kind !== "daily_total";
+          }
+          return true;
+        });
+
+        hydrationLastConsumedAtEpoch = lastEntry
+          ? Math.floor(lastEntry.timestamp.getTime() / 1000)
+          : null;
+      }
+
       const dateLocal = DateTime.fromJSDate(dayStartUtc, { zone: "utc" })
         .setZone(timezone)
         .toISODate();
@@ -255,6 +287,7 @@ garminRouter.get(
         hydrationConsumedMl: hydration?.consumedMl ?? null,
         hydrationTargetMl: hydration?.targetMl ?? null,
         hydrationStatus: hydration?.status ?? null,
+        hydrationLastConsumedAtEpoch,
       });
     } catch (err) {
       next(err);
