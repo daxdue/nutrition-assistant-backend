@@ -4,6 +4,8 @@ import { message } from 'telegraf/filters';
 import axios from 'axios';
 import { DateTime } from 'luxon';
 
+import { HydrationSource, HydrationTargetMode } from '@prisma/client';
+import type { HydrationSettings } from '@prisma/client';
 import { prisma } from '../db/client';
 import { processMealPhotoTask } from '../modules/tasks/processMealPhotoTask';
 import { generatePairingToken } from '../services/garmin.service';
@@ -18,6 +20,14 @@ import { ensureDailyAiReportForUserDay } from '../modules/dailySummary/dailySumm
 import { MAX_MEAL_CORRECTIONS_PER_ENTRY } from '../config/limits';
 import { formatNutritionSummary } from '../utils/formatNutrition';
 import { DEFAULT_TIMEZONE, getStartOfDayUtcFromDate } from '../utils/timezone';
+import {
+  computeHydrationRollup,
+  createHydrationEntryIfEnabled,
+  formatHydrationTargetHint,
+  getHydrationSettings,
+  parseHydrationVolumeToMl,
+  upsertHydrationSettings,
+} from '../modules/hydration/hydration.service';
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!BOT_TOKEN) {
@@ -46,6 +56,8 @@ async function replyMarkdownWithFallback(ctx: Context, text: string) {
 
 const CORRECTION_MENU_LIMIT = 6;
 const CORRECTION_SESSION_TTL_MS = 10 * 60 * 1000;
+const WATER_PRESET_ML = [150, 200, 250, 300, 350, 500, 750, 1000];
+const HYDRATION_TARGET_PRESET_ML = [1800, 2000, 2200, 2500, 3000, 3500];
 
 type PendingCorrectionSession = {
   entryId: string;
@@ -93,6 +105,203 @@ function formatMealEntrySummary(entry: any, timezone: string) {
     .toFormat('HH:mm');
 
   return { time, name: baseName, kcalText };
+}
+
+function buildWaterQuickKeyboard() {
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let i = 0; i < WATER_PRESET_ML.length; i += 2) {
+    const row: Array<{ text: string; callback_data: string }> = [];
+    for (let j = i; j < i + 2 && j < WATER_PRESET_ML.length; j += 1) {
+      const amount = WATER_PRESET_ML[j];
+      row.push({
+        text: formatHydrationTargetHint(amount),
+        callback_data: `water_add:${amount}`,
+      });
+    }
+    rows.push(row);
+  }
+  rows.push([{ text: "Close", callback_data: "water_cancel" }]);
+  return { inline_keyboard: rows };
+}
+
+function buildHydrationSetupKeyboard(settings: HydrationSettings | null) {
+  const enabled = Boolean(settings?.enabled);
+  const remindersEnabled = settings?.remindersEnabled ?? true;
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+
+  const autoLabel =
+    settings?.targetMode === HydrationTargetMode.RECOMMENDED && enabled ? "Recommended ✓" : "Use Recommended";
+  const manualLabel =
+    settings?.targetMode === HydrationTargetMode.MANUAL && enabled ? "Manual Target ✓" : "Set Manual Target";
+
+  rows.push([
+    { text: autoLabel, callback_data: "hydration_enable_auto" },
+    { text: manualLabel, callback_data: "hydration_target_pick" },
+  ]);
+
+  if (enabled) {
+    rows.push([
+      {
+        text: `Reminders: ${remindersEnabled ? "On" : "Off"}`,
+        callback_data: "hydration_toggle_reminders",
+      },
+    ]);
+    rows.push([{ text: "Disable", callback_data: "hydration_disable" }]);
+  }
+
+  rows.push([{ text: "Close", callback_data: "hydration_close" }]);
+  return { inline_keyboard: rows };
+}
+
+function buildHydrationTargetKeyboard() {
+  const rows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (let i = 0; i < HYDRATION_TARGET_PRESET_ML.length; i += 2) {
+    const row: Array<{ text: string; callback_data: string }> = [];
+    for (let j = i; j < i + 2 && j < HYDRATION_TARGET_PRESET_ML.length; j += 1) {
+      const amount = HYDRATION_TARGET_PRESET_ML[j];
+      row.push({
+        text: formatHydrationTargetHint(amount),
+        callback_data: `hydration_target:${amount}`,
+      });
+    }
+    rows.push(row);
+  }
+  rows.push([
+    { text: "Back", callback_data: "hydration_menu" },
+    { text: "Use Recommended", callback_data: "hydration_enable_auto" },
+  ]);
+  rows.push([{ text: "Close", callback_data: "hydration_close" }]);
+  return { inline_keyboard: rows };
+}
+
+async function logWaterEntry(
+  user: { id: string; timezone: string | null; weightKg: number | null },
+  volumeMl: number,
+  timestamp?: Date
+) {
+  const entry = await createHydrationEntryIfEnabled({
+    userId: user.id,
+    volumeMl,
+    timestamp,
+    source: HydrationSource.MANUAL,
+  });
+
+  if (!entry) {
+    return {
+      ok: false,
+      message: "Hydration tracking is disabled. Enable it with /hydration on 2500 or /hydration auto.",
+    };
+  }
+
+  const hydration = await getHydrationRollupForToday(user);
+  if (hydration?.targetMl) {
+    const consumedText = formatHydrationTargetHint(hydration.consumedMl);
+    const targetText = formatHydrationTargetHint(hydration.targetMl);
+    const pct = Math.round((hydration.consumedMl / hydration.targetMl) * 100);
+    return {
+      ok: true,
+      message: `Logged ${formatHydrationTargetHint(volumeMl)}. Today: ${consumedText} / ${targetText} (${pct}%).`,
+    };
+  }
+
+  return { ok: true, message: `Logged ${formatHydrationTargetHint(volumeMl)}.` };
+}
+
+async function getHydrationStateForUser(user: { id: string; timezone: string | null; weightKg: number | null }) {
+  const settings = await getHydrationSettings(user.id);
+  const hydration = settings?.enabled ? await getHydrationRollupForToday(user) : null;
+  return { settings, hydration };
+}
+
+function buildHydrationStatusMessageFromState(
+  settings: HydrationSettings | null,
+  hydration: Awaited<ReturnType<typeof getHydrationRollupForToday>> | null
+) {
+  if (!settings || !settings.enabled) {
+    return "Hydration tracking is disabled. Tap an option below to enable.";
+  }
+
+  if (!hydration) {
+    return "Hydration tracking is enabled. Log water with /water.";
+  }
+
+  const consumedText = formatHydrationTargetHint(hydration.consumedMl);
+  const targetText = formatHydrationTargetHint(hydration.targetMl);
+  const pct = hydration.targetMl ? Math.round((hydration.consumedMl / hydration.targetMl) * 100) : null;
+  const modeLabel = settings.targetMode === HydrationTargetMode.RECOMMENDED ? "recommended" : "manual";
+
+  let message = targetText
+    ? `Hydration: ${consumedText} / ${targetText}${pct !== null ? ` (${pct}%)` : ""}.`
+    : `Hydration: ${consumedText} logged today.`;
+  message += ` Target (${modeLabel}).`;
+
+  if (
+    hydration.recommendedMl &&
+    hydration.targetMl &&
+    settings.targetMode === HydrationTargetMode.MANUAL &&
+    Math.abs(hydration.recommendedMl - hydration.targetMl) >= 100
+  ) {
+    message += ` Recommended: ${formatHydrationTargetHint(hydration.recommendedMl)}.`;
+  }
+
+  if (hydration.manualMl > 0 && hydration.providerMl > 0 && hydration.consumedMl === hydration.manualMl) {
+    message += " Provider intake ignored because manual logs are primary.";
+  }
+
+  if (settings.remindersEnabled) {
+    message += ` Reminders ${settings.reminderStartHour}:00-${settings.reminderEndHour}:00 every ${settings.reminderIntervalMinutes} min.`;
+  } else {
+    message += " Reminders off.";
+  }
+
+  message += " Log water with /water and tap an amount.";
+  return message;
+}
+
+async function replyHydrationMenu(ctx: Context, user: { id: string; timezone: string | null; weightKg: number | null }) {
+  const { settings, hydration } = await getHydrationStateForUser(user);
+  const message = buildHydrationStatusMessageFromState(settings, hydration);
+  return ctx.reply(message, { reply_markup: buildHydrationSetupKeyboard(settings) });
+}
+
+async function updateHydrationMenu(ctx: Context, user: { id: string; timezone: string | null; weightKg: number | null }) {
+  const { settings, hydration } = await getHydrationStateForUser(user);
+  const message = buildHydrationStatusMessageFromState(settings, hydration);
+  const replyMarkup = buildHydrationSetupKeyboard(settings);
+  try {
+    await ctx.editMessageText(message, { reply_markup: replyMarkup });
+  } catch (error) {
+    await ctx.reply(message, { reply_markup: replyMarkup });
+  }
+}
+
+async function getHydrationRollupForToday(user: { id: string; timezone: string | null; weightKg: number | null }) {
+  const timezone = user.timezone ?? DEFAULT_TIMEZONE;
+  const dayStartUtc = getStartOfDayUtcFromDate(new Date(), timezone);
+  const dailySummary = await prisma.dailySummary.findUnique({
+    where: { userId_date: { userId: user.id, date: dayStartUtc } },
+    select: {
+      activeMinutesTotal: true,
+      activeMinutesModerate: true,
+      activeMinutesVigorous: true,
+      activeCaloriesKcal: true,
+      temperatureAvgC: true,
+      temperatureMaxC: true,
+    },
+  });
+
+  return computeHydrationRollup({
+    userId: user.id,
+    dayStartUtc,
+    timezone,
+    weightKg: user.weightKg ?? null,
+    activeMinutesTotal: dailySummary?.activeMinutesTotal ?? null,
+    activeMinutesModerate: dailySummary?.activeMinutesModerate ?? null,
+    activeMinutesVigorous: dailySummary?.activeMinutesVigorous ?? null,
+    activeCaloriesKcal: dailySummary?.activeCaloriesKcal ?? null,
+    temperatureAvgC: dailySummary?.temperatureAvgC ?? null,
+    temperatureMaxC: dailySummary?.temperatureMaxC ?? null,
+  });
 }
 
 /**
@@ -387,6 +596,354 @@ bot.command("summary", async (ctx) => {
     console.error("Failed to generate summary:", error);
     await ctx.reply("Sorry, I couldn't generate your summary right now.");
   }
+});
+
+bot.command("water", async (ctx) => {
+  const user = await getOrCreateUser(ctx);
+
+  if (!user) {
+    return ctx.reply(
+      "🚫 You are not authorized to use this bot.\n" +
+      "Use /start to submit an access request."
+    );
+  }
+
+  if (user.status !== "ACTIVE") {
+    return ctx.reply(
+      "⏳ Your access request is pending.\n" +
+      "You’ll be able to log water once an admin approves it."
+    );
+  }
+
+  const settings = await getHydrationSettings(user.id);
+  if (!settings?.enabled) {
+    const message = buildHydrationStatusMessageFromState(settings, null);
+    return ctx.reply(message, { reply_markup: buildHydrationSetupKeyboard(settings) });
+  }
+
+  const text = ("text" in (ctx.message ?? {}) ? (ctx.message as any).text : "") as string;
+  const args = text.split(" ").slice(1).join(" ").trim();
+  if (!args) {
+    return ctx.reply("Tap to log water:", { reply_markup: buildWaterQuickKeyboard() });
+  }
+
+  const volumeMl = parseHydrationVolumeToMl(args);
+  if (!volumeMl) {
+    return ctx.reply("Could not parse that amount. Tap /water for quick buttons.");
+  }
+
+  const result = await logWaterEntry(
+    user,
+    volumeMl,
+    ctx.message && "date" in ctx.message ? new Date((ctx.message as any).date * 1000) : undefined
+  );
+
+  return ctx.reply(result.message, { reply_markup: buildWaterQuickKeyboard() });
+});
+
+bot.command("hydration", async (ctx) => {
+  const user = await getOrCreateUser(ctx);
+
+  if (!user) {
+    return ctx.reply(
+      "🚫 You are not authorized to use this bot.\n" +
+      "Use /start to submit an access request."
+    );
+  }
+
+  if (user.status !== "ACTIVE") {
+    return ctx.reply(
+      "⏳ Your access request is pending.\n" +
+      "You’ll be able to manage hydration once an admin approves it."
+    );
+  }
+
+  const text = ("text" in (ctx.message ?? {}) ? (ctx.message as any).text : "") as string;
+  const args = text.split(" ").slice(1);
+  const action = args[0]?.toLowerCase();
+
+  if (!action || action === "status" || action === "menu") {
+    return replyHydrationMenu(ctx, user);
+  }
+
+  if (["off", "disable", "stop"].includes(action)) {
+    await upsertHydrationSettings({ userId: user.id, enabled: false });
+    return replyHydrationMenu(ctx, user);
+  }
+
+  if (["auto", "recommended"].includes(action)) {
+    await upsertHydrationSettings({
+      userId: user.id,
+      enabled: true,
+      targetMode: HydrationTargetMode.RECOMMENDED,
+      dailyTargetMl: null,
+    });
+    return replyHydrationMenu(ctx, user);
+  }
+
+  if (["on", "enable", "start"].includes(action)) {
+    const rest = args.slice(1).join(" ").trim();
+    if (rest) {
+      const targetMl = parseHydrationVolumeToMl(rest);
+      if (!targetMl) {
+        return ctx.reply("Pick a daily target:", { reply_markup: buildHydrationTargetKeyboard() });
+      }
+      await upsertHydrationSettings({
+        userId: user.id,
+        enabled: true,
+        targetMode: HydrationTargetMode.MANUAL,
+        dailyTargetMl: targetMl,
+      });
+    } else {
+      await upsertHydrationSettings({
+        userId: user.id,
+        enabled: true,
+        targetMode: HydrationTargetMode.RECOMMENDED,
+        dailyTargetMl: null,
+      });
+    }
+    return replyHydrationMenu(ctx, user);
+  }
+
+  if (["target", "goal"].includes(action)) {
+    const targetText = args.slice(1).join(" ").trim();
+    if (!targetText) {
+      return ctx.reply("Pick a daily target:", { reply_markup: buildHydrationTargetKeyboard() });
+    }
+    const targetMl = parseHydrationVolumeToMl(targetText);
+    if (!targetMl) {
+      return ctx.reply("Pick a daily target:", { reply_markup: buildHydrationTargetKeyboard() });
+    }
+    await upsertHydrationSettings({
+      userId: user.id,
+      enabled: true,
+      targetMode: HydrationTargetMode.MANUAL,
+      dailyTargetMl: targetMl,
+    });
+    return replyHydrationMenu(ctx, user);
+  }
+
+  return replyHydrationMenu(ctx, user);
+});
+
+bot.action("hydration_menu", async (ctx) => {
+  try {
+    const user = await getOrCreateUser(ctx);
+    if (!user || user.status !== "ACTIVE") {
+      await ctx.answerCbQuery("Not authorized", { show_alert: true });
+      return;
+    }
+    await ctx.answerCbQuery();
+    await updateHydrationMenu(ctx, user);
+  } catch (error) {
+    console.error("Failed to refresh hydration menu:", error);
+  }
+});
+
+bot.action("hydration_enable_auto", async (ctx) => {
+  try {
+    const user = await getOrCreateUser(ctx);
+    if (!user || user.status !== "ACTIVE") {
+      await ctx.answerCbQuery("Not authorized", { show_alert: true });
+      return;
+    }
+    await upsertHydrationSettings({
+      userId: user.id,
+      enabled: true,
+      targetMode: HydrationTargetMode.RECOMMENDED,
+      dailyTargetMl: null,
+    });
+    await ctx.answerCbQuery("Enabled");
+    await updateHydrationMenu(ctx, user);
+  } catch (error) {
+    console.error("Failed to enable hydration:", error);
+    await ctx.answerCbQuery("Something went wrong", { show_alert: true });
+  }
+});
+
+bot.action("hydration_target_pick", async (ctx) => {
+  try {
+    const user = await getOrCreateUser(ctx);
+    if (!user || user.status !== "ACTIVE") {
+      await ctx.answerCbQuery("Not authorized", { show_alert: true });
+      return;
+    }
+    await ctx.answerCbQuery();
+    try {
+      await ctx.editMessageText("Pick a daily target:", { reply_markup: buildHydrationTargetKeyboard() });
+    } catch (error) {
+      await ctx.reply("Pick a daily target:", { reply_markup: buildHydrationTargetKeyboard() });
+    }
+  } catch (error) {
+    console.error("Failed to open target picker:", error);
+  }
+});
+
+bot.action(/hydration_target:(\d+)/, async (ctx) => {
+  try {
+    const user = await getOrCreateUser(ctx);
+    if (!user || user.status !== "ACTIVE") {
+      await ctx.answerCbQuery("Not authorized", { show_alert: true });
+      return;
+    }
+
+    const match = ctx.match as RegExpMatchArray;
+    const amount = Number.parseInt(match[1], 10);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      await ctx.answerCbQuery("Invalid amount", { show_alert: true });
+      return;
+    }
+
+    await upsertHydrationSettings({
+      userId: user.id,
+      enabled: true,
+      targetMode: HydrationTargetMode.MANUAL,
+      dailyTargetMl: amount,
+    });
+    await ctx.answerCbQuery("Target set");
+    await updateHydrationMenu(ctx, user);
+  } catch (error) {
+    console.error("Failed to set hydration target:", error);
+    await ctx.answerCbQuery("Something went wrong", { show_alert: true });
+  }
+});
+
+bot.action("hydration_toggle_reminders", async (ctx) => {
+  try {
+    const user = await getOrCreateUser(ctx);
+    if (!user || user.status !== "ACTIVE") {
+      await ctx.answerCbQuery("Not authorized", { show_alert: true });
+      return;
+    }
+
+    const settings = await getHydrationSettings(user.id);
+    if (!settings?.enabled) {
+      await ctx.answerCbQuery("Enable hydration first", { show_alert: true });
+      return;
+    }
+
+    const nextValue = !settings.remindersEnabled;
+    await upsertHydrationSettings({
+      userId: user.id,
+      remindersEnabled: nextValue,
+    });
+    await ctx.answerCbQuery(nextValue ? "Reminders on" : "Reminders off");
+    await updateHydrationMenu(ctx, user);
+  } catch (error) {
+    console.error("Failed to toggle hydration reminders:", error);
+    await ctx.answerCbQuery("Something went wrong", { show_alert: true });
+  }
+});
+
+bot.action("hydration_disable", async (ctx) => {
+  try {
+    const user = await getOrCreateUser(ctx);
+    if (!user || user.status !== "ACTIVE") {
+      await ctx.answerCbQuery("Not authorized", { show_alert: true });
+      return;
+    }
+    await upsertHydrationSettings({ userId: user.id, enabled: false });
+    await ctx.answerCbQuery("Disabled");
+    await updateHydrationMenu(ctx, user);
+  } catch (error) {
+    console.error("Failed to disable hydration:", error);
+    await ctx.answerCbQuery("Something went wrong", { show_alert: true });
+  }
+});
+
+bot.action("hydration_close", async (ctx) => {
+  try {
+    await ctx.answerCbQuery("Closed");
+    try {
+      await ctx.deleteMessage();
+    } catch (error) {
+      // ignore if message can't be deleted
+    }
+  } catch (error) {
+    console.error("Failed to close hydration menu:", error);
+  }
+});
+
+bot.action(/water_add:(\d+)/, async (ctx) => {
+  try {
+    const user = await getOrCreateUser(ctx);
+    if (!user || user.status !== "ACTIVE") {
+      await ctx.answerCbQuery("Not authorized", { show_alert: true });
+      return;
+    }
+
+    const match = ctx.match as RegExpMatchArray;
+    const amount = Number.parseInt(match[1], 10);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      await ctx.answerCbQuery("Invalid amount", { show_alert: true });
+      return;
+    }
+
+    const result = await logWaterEntry(user, amount);
+    await ctx.answerCbQuery(result.ok ? "Logged" : "Hydration disabled", { show_alert: !result.ok });
+
+    const replyMarkup = result.ok
+      ? buildWaterQuickKeyboard()
+      : buildHydrationSetupKeyboard(await getHydrationSettings(user.id));
+
+    try {
+      await ctx.editMessageText(result.message, { reply_markup: replyMarkup });
+    } catch (error) {
+      await ctx.reply(result.message, { reply_markup: replyMarkup });
+    }
+  } catch (error) {
+    console.error("Failed to log water:", error);
+    await ctx.answerCbQuery("Something went wrong", { show_alert: true });
+  }
+});
+
+bot.action("water_cancel", async (ctx) => {
+  try {
+    await ctx.answerCbQuery("Closed");
+    try {
+      await ctx.deleteMessage();
+    } catch (error) {
+      // ignore if message can't be deleted
+    }
+  } catch (error) {
+    console.error("Failed to close water picker:", error);
+  }
+});
+
+bot.command("weight", async (ctx) => {
+  const user = await getOrCreateUser(ctx);
+
+  if (!user) {
+    return ctx.reply(
+      "🚫 You are not authorized to use this bot.\n" +
+      "Use /start to submit an access request."
+    );
+  }
+
+  if (user.status !== "ACTIVE") {
+    return ctx.reply(
+      "⏳ Your access request is pending.\n" +
+      "You’ll be able to set weight once an admin approves it."
+    );
+  }
+
+  const text = ("text" in (ctx.message ?? {}) ? (ctx.message as any).text : "") as string;
+  const valueText = text.split(" ").slice(1).join(" ").trim();
+  if (!valueText) {
+    return ctx.reply("Usage: /weight 70 (kg)");
+  }
+
+  const weight = Number.parseFloat(valueText.replace(",", "."));
+  if (!Number.isFinite(weight) || weight < 30 || weight > 250) {
+    return ctx.reply("Please provide a valid weight in kg, e.g. /weight 70.");
+  }
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { weightKg: weight },
+  });
+
+  return ctx.reply(`Saved weight: ${weight} kg. This helps hydration recommendations.`);
 });
 
 bot.command("fix", async (ctx) => {
@@ -793,6 +1350,9 @@ export async function launchBot() {
     { command: 'start', description: 'Start the bot' },
     { command: 'pair', description: 'Pair Garmin watch' },
     { command: 'stats', description: 'Open nutrition stats' },
+    { command: 'water', description: 'Log water intake' },
+    { command: 'hydration', description: 'Hydration settings' },
+    { command: 'weight', description: 'Set weight for recommendations' },
     { command: 'fix', description: 'Correct a meal analysis' },
     { command: 'cancel', description: 'Cancel current action' },
     { command: 'privacy', description: 'View privacy policy' },
