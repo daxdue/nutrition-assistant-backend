@@ -794,17 +794,7 @@ function buildActivityLines(summary: GarminSummaryInput): string[] {
 
     const stepsDistance = isNumber(summary.distanceCm) && summary.distanceCm > 0 ? summary.distanceCm : null;
     const activityDistance = getActivityDistanceCm(summary);
-    let totalDistance: number | null = null;
-    if (stepsDistance !== null && activityDistance !== null) {
-        let stepsBased = false;
-        if (isNumber(summary.steps) && summary.steps > 0) {
-            const strideCm = stepsDistance / summary.steps;
-            stepsBased = strideCm >= 30 && strideCm <= 150;
-        }
-        totalDistance = stepsBased ? stepsDistance + activityDistance : Math.max(stepsDistance, activityDistance);
-    } else {
-        totalDistance = stepsDistance ?? activityDistance;
-    }
+    const totalDistance = stepsDistance ?? activityDistance;
     if (totalDistance !== null) {
         lines.push(`Total distance: ${formatDistance(totalDistance)}`);
     }

@@ -10,7 +10,13 @@ import { bot } from "../../telegram/bot";
 import { apiKeyAuth, verifyDeviceId, AuthenticatedRequest } from '../middleware/apiKeyAuth';
 import { garminDeviceRateLimit } from '../middleware/rateLimit';
 import { GarminActivity, GarminActivitySummary, GarminActivitySummaryByType } from "../../interfaces/GarminActivity";
-import { computeHydrationRollup, createHydrationEntry, isHydrationEnabled } from "../../modules/hydration/hydration.service";
+import {
+  computeHydrationRollup,
+  createHydrationEntry,
+  createHydrationEntryIfEnabled,
+  isHydrationEnabled,
+  parseHydrationVolumeToMl,
+} from "../../modules/hydration/hydration.service";
 
 export const garminRouter = Router();
 
@@ -18,6 +24,58 @@ const isFiniteNumber = (value: unknown): value is number => typeof value === "nu
 
 const asRecord = (value: unknown): Record<string, unknown> =>
   value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+
+const parseHydrationVolumeInput = (value: unknown): number | null => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return parseHydrationVolumeToMl(value.toString());
+  }
+  if (typeof value === "string") {
+    return parseHydrationVolumeToMl(value);
+  }
+  return null;
+};
+
+const parseEpochTimestamp = (value: unknown): Date | null => {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  const epochMs = value > 1_000_000_000_000 ? value : value * 1000;
+  const date = new Date(epochMs);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const getHydrationLastConsumedAtEpoch = async (params: {
+  userId: string;
+  start: Date;
+  end: Date;
+}): Promise<number | null> => {
+  const recentHydrationEntries = await prisma.hydrationEntry.findMany({
+    where: {
+      userId: params.userId,
+      timestamp: { gte: params.start, lt: params.end },
+    },
+    orderBy: { timestamp: 'desc' },
+    take: 10,
+    select: {
+      timestamp: true,
+      source: true,
+      providerMeta: true,
+    },
+  });
+
+  const lastEntry = recentHydrationEntries.find((entry) => {
+    if (entry.source === "MANUAL") {
+      return true;
+    }
+    const meta = entry.providerMeta;
+    if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+      return (meta as Record<string, unknown>).kind !== "daily_total";
+    }
+    return true;
+  });
+
+  return lastEntry ? Math.floor(lastEntry.timestamp.getTime() / 1000) : null;
+};
 
 const buildActivitySummary = (activities?: GarminActivity[]): GarminActivitySummary | undefined => {
   if (!activities || activities.length === 0) {
@@ -238,37 +296,9 @@ garminRouter.get(
         temperatureMaxC: dailySummary?.temperatureMaxC ?? null,
       });
 
-      let hydrationLastConsumedAtEpoch: number | null = null;
-      if (hydration) {
-        const recentHydrationEntries = await prisma.hydrationEntry.findMany({
-          where: {
-            userId: deviceUserId,
-            timestamp: { gte: start, lt: end },
-          },
-          orderBy: { timestamp: 'desc' },
-          take: 10,
-          select: {
-            timestamp: true,
-            source: true,
-            providerMeta: true,
-          },
-        });
-
-        const lastEntry = recentHydrationEntries.find((entry) => {
-          if (entry.source === "MANUAL") {
-            return true;
-          }
-          const meta = entry.providerMeta;
-          if (meta && typeof meta === "object" && !Array.isArray(meta)) {
-            return (meta as Record<string, unknown>).kind !== "daily_total";
-          }
-          return true;
-        });
-
-        hydrationLastConsumedAtEpoch = lastEntry
-          ? Math.floor(lastEntry.timestamp.getTime() / 1000)
-          : null;
-      }
+      const hydrationLastConsumedAtEpoch = hydration
+        ? await getHydrationLastConsumedAtEpoch({ userId: deviceUserId, start, end })
+        : null;
 
       const dateLocal = DateTime.fromJSDate(dayStartUtc, { zone: "utc" })
         .setZone(timezone)
@@ -283,6 +313,106 @@ garminRouter.get(
         totalCarbsG: rollup.nutritionCarbsG,
         totalFatG: rollup.nutritionFatG,
         totalFiberG: rollup.nutritionFiberG,
+        hydrationEnabled: Boolean(hydration),
+        hydrationConsumedMl: hydration?.consumedMl ?? null,
+        hydrationTargetMl: hydration?.targetMl ?? null,
+        hydrationStatus: hydration?.status ?? null,
+        hydrationLastConsumedAtEpoch,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+garminRouter.post(
+  '/hydration',
+  async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    try {
+      const deviceUserId = req.device?.userId;
+      if (!deviceUserId) {
+        return res.status(403).json({ error: 'Device not authenticated' });
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { id: deviceUserId },
+        select: { timezone: true, weightKg: true },
+      });
+
+      if (!user) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      const volumeInput =
+        req.body?.volumeMl ??
+        req.body?.volume ??
+        req.body?.amount ??
+        req.body?.ml ??
+        req.body?.value;
+      const volumeMl = parseHydrationVolumeInput(volumeInput);
+      if (!volumeMl) {
+        return res.status(400).json({ error: 'volumeMl is required and must be between 10 and 5000 ml' });
+      }
+
+      const timestampInput =
+        req.body?.timestamp ??
+        req.body?.timestampSeconds ??
+        req.body?.timestampSec ??
+        req.body?.timestampMs ??
+        req.body?.time;
+      const entryTimestamp = parseEpochTimestamp(timestampInput) ?? new Date();
+
+      const entry = await createHydrationEntryIfEnabled({
+        userId: deviceUserId,
+        volumeMl,
+        timestamp: entryTimestamp,
+        source: HydrationSource.MANUAL,
+      });
+
+      if (!entry) {
+        return res.status(409).json({
+          error: 'Hydration tracking is disabled',
+          hydrationEnabled: false,
+        });
+      }
+
+      const timezone = user.timezone ?? DEFAULT_TIMEZONE;
+      const dayStartUtc = getStartOfDayUtcFromDate(entry.timestamp, timezone);
+      const { start, end } = getUtcDayRange(dayStartUtc);
+
+      const dailySummary = await prisma.dailySummary.findUnique({
+        where: { userId_date: { userId: deviceUserId, date: dayStartUtc } },
+        select: {
+          activeMinutesTotal: true,
+          activeMinutesModerate: true,
+          activeMinutesVigorous: true,
+          activeCaloriesKcal: true,
+          temperatureAvgC: true,
+          temperatureMaxC: true,
+        },
+      });
+
+      const hydration = await computeHydrationRollup({
+        userId: deviceUserId,
+        dayStartUtc,
+        timezone,
+        weightKg: user.weightKg ?? null,
+        activeMinutesTotal: dailySummary?.activeMinutesTotal ?? null,
+        activeMinutesModerate: dailySummary?.activeMinutesModerate ?? null,
+        activeMinutesVigorous: dailySummary?.activeMinutesVigorous ?? null,
+        activeCaloriesKcal: dailySummary?.activeCaloriesKcal ?? null,
+        temperatureAvgC: dailySummary?.temperatureAvgC ?? null,
+        temperatureMaxC: dailySummary?.temperatureMaxC ?? null,
+      });
+
+      const hydrationLastConsumedAtEpoch = await getHydrationLastConsumedAtEpoch({
+        userId: deviceUserId,
+        start,
+        end,
+      });
+
+      return res.json({
+        ok: true,
         hydrationEnabled: Boolean(hydration),
         hydrationConsumedMl: hydration?.consumedMl ?? null,
         hydrationTargetMl: hydration?.targetMl ?? null,
