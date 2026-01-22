@@ -5,4 +5,4 @@ ALTER TABLE "DailySummary" ADD COLUMN     "nutritionFiberG" DOUBLE PRECISION;
 ALTER TABLE "FoodEntry" ADD COLUMN     "fiberG" DOUBLE PRECISION;
 
 -- AlterTable
-ALTER TABLE "ProviderAccount" ALTER COLUMN "scopes" DROP DEFAULT;
+ALTER TABLE IF EXISTS "ProviderAccount" ALTER COLUMN "scopes" DROP DEFAULT;

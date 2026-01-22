@@ -8,7 +8,7 @@ import { HydrationSource, HydrationTargetMode } from '@prisma/client';
 import type { HydrationSettings } from '@prisma/client';
 import { prisma } from '../db/client';
 import { processMealPhotoTask } from '../modules/tasks/processMealPhotoTask';
-import { generatePairingToken } from '../services/garmin.service';
+import { handleGarminPairingStart } from '../modules/telegram/handlers/start.handler';
 import {
   applyMealCorrection,
   MealCorrectionInvalidAnalysisError,
@@ -39,7 +39,6 @@ export const bot = new Telegraf(BOT_TOKEN);
 const ADMIN_TELEGRAM_ID = Number(process.env.ADMIN_TELEGRAM_ID);
 const PRIVACY_URL = "https://nutrition-miniapp-933t8h3ax-daxdues-projects.vercel.app/privacy.html";
 const BACKEND_URL = process.env.BACKEND_URL || process.env.PUBLIC_URL || 'http://localhost:3000';
-const MINIAPP_URL = process.env.FRONTEND_ORIGIN || "https://nutrition-miniapp-933t8h3ax-daxdues-projects.vercel.app";
 
 function stripMarkdown(text: string): string {
   return text.replace(/\\([_*`[\]])/g, "$1").replace(/[*_`]/g, "");
@@ -393,6 +392,13 @@ bot.use(async (ctx, next) => {
 });
 
 bot.start(async (ctx) => {
+  if (ctx.startPayload) {
+    const handled = await handleGarminPairingStart(ctx, ctx.startPayload);
+    if (handled) {
+      return;
+    }
+  }
+
   const user = await getOrCreateUser(ctx);
 
   if (!user) {
@@ -1196,39 +1202,14 @@ bot.command("pairGarminWatch", async (ctx) => {
     );
   }
 
-  try {
-    // Generate pairing token via API
-    const token = await generatePairingToken(user.id);
-    console.log("Token: ", token);
-    const pairingUrl = `${MINIAPP_URL}?token=${token?.token}&page=pairing`;
-
-    await ctx.reply(
-      `⌚ *Pair Garmin Watch*\n\n` +
-      `1. Open the Nutrition Assistant app on your Garmin watch\n` +
-      `2. The watch will display a Device ID or QR code\n` +
-      `3. Tap the button below to open the pairing page\n` +
-      `4. Scan the QR code or enter the Device ID manually\n\n` +
-      `⚠️ This pairing link expires in 10 minutes.`,
-      {
-        parse_mode: "Markdown",
-        reply_markup: {
-          inline_keyboard: [
-            [
-              {
-                text: "⌚ Open Pairing Page",
-                web_app: { url: pairingUrl },
-              },
-            ],
-          ],
-        },
-      }
-    );
-  } catch (error: any) {
-    console.error("Error generating pairing token:", error);
-    await ctx.reply(
-      "❌ Failed to generate pairing token. Please try again later."
-    );
-  }
+  return ctx.reply(
+    `⌚ *Pair Garmin Watch*\n\n` +
+    `1. Open the Nutrition Assistant app on your Garmin watch\n` +
+    `2. Follow the pairing prompt shown on the watch\n` +
+    `3. When asked, confirm pairing in Telegram using the link provided in the web view\n\n` +
+    `If the session expires, restart pairing from the watch.`,
+    { parse_mode: "Markdown" }
+  );
 });
 
 bot.command("pending_approval", async (ctx) => {

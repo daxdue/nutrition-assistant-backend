@@ -56,6 +56,14 @@ enum HydrationStatus {
   COMPLETE
 }
 
+enum GarminPairStatus {
+  PENDING
+  CONFIRMED
+  DENIED
+  EXPIRED
+  COMPLETED
+}
+
 model User {
   id               String        @id @default(uuid())
   telegramUserId   BigInt        @unique
@@ -105,9 +113,38 @@ model GarminDevice {
   model     String?
   firmwareVersion String?
   deviceName String?
+  deviceTokenHash String? @unique
+  tokenCreatedAt DateTime?
+  tokenRevokedAt DateTime?
   createdAt DateTime @default(now())
   
   @@index([apiKey])
+}
+
+model GarminPairSession {
+  id                 String           @id @default(uuid())
+  state              String           @unique
+  wstHash            String
+  status             GarminPairStatus @default(PENDING)
+
+  deviceId           String
+  deviceName         String?
+
+  confirmedUserId    String?
+  confirmedAt        DateTime?
+  completedAt        DateTime?
+
+  claimCodeHash      String?
+  claimCodeExpiresAt DateTime?
+  claimCodeUsedAt    DateTime?
+
+  expiresAt          DateTime
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  @@index([deviceId])
+  @@index([expiresAt])
+  @@index([confirmedUserId])
 }
 
 model DailySummary {

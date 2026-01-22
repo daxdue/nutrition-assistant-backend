@@ -1,5 +1,5 @@
 // src/http/routes/garmin.ts
-import { Router, Response, NextFunction } from 'express';
+import { Router, Response, NextFunction, Request } from 'express';
 import crypto from "crypto";
 import { HydrationSource, Prisma } from "@prisma/client";
 import { prisma } from '../../db/client';
@@ -8,8 +8,14 @@ import { DEFAULT_TIMEZONE, getStartOfDayUtcFromDate, getStartOfDayUtcFromEpochSe
 import { ensureDailyAiReportForUserDay, buildDailyInputHash, computeRollup } from "../../modules/dailySummary/dailySummary.service";
 import { bot } from "../../telegram/bot";
 import { apiKeyAuth, verifyDeviceId, AuthenticatedRequest } from '../middleware/apiKeyAuth';
-import { garminDeviceRateLimit } from '../middleware/rateLimit';
+import { garminDeviceRateLimit, rateLimit } from '../middleware/rateLimit';
 import { GarminActivity, GarminActivitySummary, GarminActivitySummaryByType } from "../../interfaces/GarminActivity";
+import {
+  claimDeviceToken,
+  createPairingSession,
+  getPairingStatus,
+  validateWebviewAuth,
+} from "../../modules/garmin/garminPair.service";
 import {
   computeHydrationRollup,
   createHydrationEntry,
@@ -224,6 +230,119 @@ export interface GarminDailyPayloadV2 {
     activitySummary?: GarminActivitySummary;
   };
 }
+
+garminRouter.post(
+  '/pair/session',
+  async (
+    req: Request<unknown, unknown, { deviceId?: string; deviceName?: string | null }>,
+    res: Response,
+    next: NextFunction
+  ) => {
+    try {
+      const { deviceId, deviceName } = req.body ?? {};
+      if (!deviceId || typeof deviceId !== "string") {
+        return res.status(400).json({ error: 'Missing deviceId' });
+      }
+
+      const session = await createPairingSession({
+        deviceId,
+        deviceName: deviceName ?? null,
+      });
+
+      return res.json({
+        state: session.state,
+        wst: session.wst,
+        expiresAt: session.expiresAt.toISOString(),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+garminRouter.get(
+  '/pair/webview-auth',
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const state = typeof req.query.state === "string" ? req.query.state : null;
+      const wst = typeof req.query.wst === "string" ? req.query.wst : null;
+      if (!state || !wst) {
+        return res.status(400).json({ ok: false, reason: 'INVALID' });
+      }
+
+      const result = await validateWebviewAuth(state, wst);
+      if (!result.ok) {
+        return res.status(403).json(result);
+      }
+
+      return res.status(200).json(result);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+garminRouter.get(
+  '/pair/status',
+  rateLimit({
+    windowMs: 60 * 1000,
+    maxRequests: 30,
+    keyGenerator: (req) => {
+      const state = typeof req.query.state === "string" ? req.query.state : "";
+      return state ? `garmin-pair:${state}` : req.ip || 'unknown';
+    },
+    message: 'Too many status requests, please try again later',
+  }),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const state = typeof req.query.state === "string" ? req.query.state : null;
+      if (!state) {
+        return res.status(400).json({ status: 'EXPIRED' });
+      }
+
+      const status = await getPairingStatus(state);
+      return res.status(200).json(status);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+garminRouter.post(
+  '/device/claim',
+  async (
+    req: Request<unknown, unknown, { state?: string; code?: string; deviceId?: string; deviceName?: string }>,
+    res: Response,
+    next: NextFunction
+  ) => {
+    try {
+      const { state, code, deviceId, deviceName } = req.body ?? {};
+      if (!state || !code || !deviceId) {
+        return res.status(400).json({ error: 'Missing state, code, or deviceId' });
+      }
+
+      const result = await claimDeviceToken({
+        state,
+        code,
+        deviceId,
+        deviceName: deviceName ?? null,
+      });
+
+      if (!result.ok) {
+        const status = result.reason === 'EXPIRED' ? 403 : 403;
+        const message =
+          result.reason === 'EXPIRED'
+            ? 'Pairing session expired'
+            : 'Pairing session invalid';
+        return res.status(status).json({ error: message });
+      }
+
+      return res.status(200).json({ deviceToken: result.deviceToken });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 // Apply rate limiting and API key authentication middleware to all routes
 garminRouter.use(garminDeviceRateLimit());
@@ -523,7 +642,7 @@ garminRouter.post(
 
       const deviceExternalId = deviceInfo?.deviceId ?? req.device?.deviceId ?? null;
       if (deviceExternalId) {
-        const deviceApiKey = req.device?.apiKey ?? undefined;
+        const deviceApiKey = req.device?.authType === "API_KEY" ? req.device.authToken : undefined;
         await prisma.providerDevice.upsert({
           where: {
             providerAccountId_externalDeviceId: {
