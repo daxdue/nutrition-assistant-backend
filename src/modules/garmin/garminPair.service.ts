@@ -157,10 +157,12 @@ export async function getPairingStatus(state: string) {
     return { status: 'DENIED' as const };
   }
 
-  if (
-    session.status === GarminPairStatus.CONFIRMED ||
-    session.status === GarminPairStatus.COMPLETED
-  ) {
+  if (session.status === GarminPairStatus.CONFIRMED) {
+    const { code } = await ensureClaimCode(session);
+    return { status: 'CONFIRMED' as const, code };
+  }
+
+  if (session.status === GarminPairStatus.COMPLETED) {
     const code = getCachedClaimCode(session.state);
     return code ? { status: 'CONFIRMED' as const, code } : { status: 'CONFIRMED' as const };
   }
