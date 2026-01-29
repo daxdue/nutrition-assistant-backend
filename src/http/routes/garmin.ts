@@ -301,17 +301,7 @@ garminRouter.get(
       }
 
       const status = await getPairingStatus(state);
-      if (status.status === 'CONFIRMED' && status.code) {
-        res.setHeader('Cache-Control', 'no-store');
-        const params = new URLSearchParams({
-          status: 'success',
-          code: status.code,
-          state,
-        });
-        const targetUrl = getFrontendPairResultUrl(req);
-        return res.redirect(302, `${targetUrl}?${params.toString()}`);
-      }
-      return res.status(200).json(status);
+      return res.status(200).json({ status: status.status });
     } catch (err) {
       next(err);
     }
@@ -320,35 +310,40 @@ garminRouter.get(
 
 garminRouter.get(
   '/pair/result',
-  (req: Request, res: Response) => {
+  async (req: Request, res: Response, next: NextFunction) => {
     res.setHeader('Cache-Control', 'no-store');
 
-    const error = typeof req.query.error === 'string' ? req.query.error : null;
     const state = typeof req.query.state === 'string' ? req.query.state : null;
-    const code = typeof req.query.code === 'string' ? req.query.code : null;
     const targetUrl = getFrontendPairResultUrl(req);
 
-    if (error) {
-      const params = new URLSearchParams({ status: 'error', error });
-      if (state) {
-        params.set('state', state);
-      }
-      return res.redirect(302, `${targetUrl}?${params.toString()}`);
-    }
-
-    if (!code || !state) {
+    if (!state) {
       const params = new URLSearchParams({
         status: 'error',
-        error: 'missing_code_or_state',
+        error: 'missing_state',
       });
-      if (state) {
-        params.set('state', state);
-      }
       return res.redirect(302, `${targetUrl}?${params.toString()}`);
     }
 
-    const params = new URLSearchParams({ status: 'success', code, state });
-    return res.redirect(302, `${targetUrl}?${params.toString()}`);
+    try {
+      const result = await getPairingStatus(state);
+      if (result.status === 'CONFIRMED' && result.code) {
+        const params = new URLSearchParams({
+          status: 'success',
+          code: result.code,
+          state: req.query.state as string,
+        });
+        return res.redirect(302, `${targetUrl}?${params.toString()}`);
+      }
+
+      const params = new URLSearchParams({
+        status: 'error',
+        error: result.status,
+        state: req.query.state as string,
+      });
+      return res.redirect(302, `${targetUrl}?${params.toString()}`);
+    } catch (err) {
+      return next(err);
+    }
   }
 );
 
