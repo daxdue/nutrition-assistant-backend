@@ -588,7 +588,7 @@ const getFrontendPairResultUrl = (req: Request): string => {
   const origin = frontendOrigin && frontendOrigin.length > 0
     ? frontendOrigin
     : `${req.protocol}://${req.get('host') ?? ''}`;
-  return `${origin}/garmin/pair/result`;
+  return `${origin}/garmin/pair/result.html`;
 };
 
 garminRouter.post(
