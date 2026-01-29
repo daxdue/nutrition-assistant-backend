@@ -301,6 +301,16 @@ garminRouter.get(
       }
 
       const status = await getPairingStatus(state);
+      if (status.status === 'CONFIRMED' && status.code) {
+        res.setHeader('Cache-Control', 'no-store');
+        const params = new URLSearchParams({
+          status: 'success',
+          code: status.code,
+          state,
+        });
+        const targetUrl = getFrontendPairResultUrl(req);
+        return res.redirect(302, `${targetUrl}?${params.toString()}`);
+      }
       return res.status(200).json(status);
     } catch (err) {
       next(err);
