@@ -332,7 +332,7 @@ garminRouter.get(
           code: result.code,
           state: req.query.state as string,
         });
-        return res.redirect(302, `${targetUrl}?${params.toString()}`);
+        return res.redirect(302, `connectiq://oauth?${params.toString()}`);
       }
 
       const params = new URLSearchParams({
