@@ -376,7 +376,7 @@ garminRouter.post(
         return res.status(status).json({ error: message });
       }
 
-      return res.status(200).json({ deviceToken: result.deviceToken });
+      return res.status(200).json({ access_token: result.access_token });
     } catch (err) {
       next(err);
     }

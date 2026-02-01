@@ -303,5 +303,5 @@ export async function claimDeviceToken(params: {
   });
 
   claimCodeCache.delete(session.state);
-  return { ok: true, deviceToken: token };
+  return { ok: true, access_token: token };
 }
