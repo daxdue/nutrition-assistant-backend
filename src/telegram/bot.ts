@@ -37,7 +37,7 @@ if (!BOT_TOKEN) {
 export const bot = new Telegraf(BOT_TOKEN);
 
 const ADMIN_TELEGRAM_ID = Number(process.env.ADMIN_TELEGRAM_ID);
-const PRIVACY_URL = "https://nutrition-miniapp-933t8h3ax-daxdues-projects.vercel.app/privacy.html";
+const PRIVACY_URL = "https://nutrition-miniapp-sigma.vercel.app/privacy.html";
 const BACKEND_URL = process.env.BACKEND_URL || process.env.PUBLIC_URL || 'http://localhost:3000';
 
 function stripMarkdown(text: string): string {
