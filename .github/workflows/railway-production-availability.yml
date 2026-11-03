@@ -1,0 +1,118 @@
+/Users/sergeikochetkov/.rvm/scripts/rvm:29: operation not permitted: ps
+name: Scale production on Railway
+
+on:
+  # GitHub Actions cron is UTC. Open 06:00-11:30 GMT+3, with 15 minutes
+  # for the database and backend to start before the open window.
+  schedule:
+    - cron: '45 2 * * *'
+    - cron: '30 8 * * *'
+  workflow_dispatch:
+    inputs:
+      state:
+        description: Desired production state
+        type: choice
+        required: true
+        options:
+          - open
+          - offline
+
+permissions:
+  contents: read
+
+concurrency:
+  group: railway-production-availability
+  cancel-in-progress: false
+
+env:
+  RAILWAY_PROJECT_ID: d52c532d-4a89-4ee9-a631-7af744fdf2fa
+  RAILWAY_ENVIRONMENT_ID: 0b3b5949-9a55-4c9e-ab9e-0767480f90ae
+  POSTGRES_SERVICE_ID: fdc374f2-2620-4eb1-9191-5c814b976e44
+  BACKEND_SERVICE_ID: d40d7f3b-9c83-4ac2-a387-fce19f78d079
+
+jobs:
+  scale:
+    name: Scale Railway production
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Deployment lifecycle commands require an account/workspace API token.
+      RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_PRODUCTION_TOKEN }}
+
+    steps:
+      - name: Install pinned Railway CLI
+        run: npm install --global @railway/cli@5.27.2
+
+      - name: Determine desired state
+        id: state
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_STATE: ${{ inputs.state }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          set -euo pipefail
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            state="${DISPATCH_STATE}"
+          elif [[ "${SCHEDULE}" == "45 2 * * *" ]]; then
+            state="open"
+          elif [[ "${SCHEDULE}" == "30 8 * * *" ]]; then
+            state="offline"
+          else
+            echo "Unknown schedule trigger: ${SCHEDULE}" >&2
+            exit 1
+          fi
+          printf 'state=%s\n' "${state}" >> "${GITHUB_OUTPUT}"
+          echo "Requested Railway state: ${state}"
+
+      - name: Change services with Railway native lifecycle
+        env:
+          STATE: ${{ steps.state.outputs.state }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${RAILWAY_API_TOKEN:-}" ]]; then
+            echo "RAILWAY_PRODUCTION_TOKEN is not configured" >&2
+            exit 1
+          fi
+
+          start_service() {
+            local name="$1"
+            local service_id="$2"
+            echo "Starting ${name} with its latest Railway deployment"
+            railway redeploy \
+              -p "${RAILWAY_PROJECT_ID}" \
+              -e "${RAILWAY_ENVIRONMENT_ID}" \
+              -s "${service_id}" \
+              --from-source \
+              --yes \
+              --json
+          }
+
+          stop_service() {
+            local name="$1"
+            local service_id="$2"
+            echo "Stopping ${name} by removing its latest deployment"
+            local output
+            if output="$(railway down \
+              -p "${RAILWAY_PROJECT_ID}" \
+              -e "${RAILWAY_ENVIRONMENT_ID}" \
+              -s "${service_id}" \
+              --yes 2>&1)"; then
+              echo "${output}"
+            elif grep -q "No deployments found" <<<"${output}"; then
+              echo "${name} has no active deployment; already offline"
+            else
+              echo "${output}" >&2
+              return 1
+            fi
+          }
+
+          if [[ "${STATE}" == "open" ]]; then
+            start_service postgres "${POSTGRES_SERVICE_ID}"
+            start_service nutrition-assistant-backend "${BACKEND_SERVICE_ID}"
+          elif [[ "${STATE}" == "offline" ]]; then
+            stop_service nutrition-assistant-backend "${BACKEND_SERVICE_ID}"
+            stop_service postgres "${POSTGRES_SERVICE_ID}"
+          else
+            echo "Unsupported state: ${STATE}" >&2
+            exit 1
+          fi
